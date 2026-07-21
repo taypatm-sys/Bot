@@ -4,4 +4,5 @@ google-genai>=1.0.0,<2.0.0
 pydantic==2.13.4
 python-dotenv==1.2.2
 httpx[socks]==0.28.1
+psycopg[binary,pool]>=3.2.0,<4.0.0
 tzdata>=2025.2

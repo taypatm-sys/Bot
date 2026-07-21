@@ -16,6 +16,7 @@ REQUIRED_FILES = (
     "app/publisher.py",
     "app/scheduling.py",
     "app/storage.py",
+    "app/template_store.py",
 )
 
 
@@ -36,6 +37,7 @@ def main() -> None:
         "app.publisher",
         "app.scheduling",
         "app.storage",
+        "app.template_store",
     ):
         import_module(module_name)
 

@@ -1,43 +1,59 @@
-# Запуск бота на Render
+# Обновление бота на Render
 
-## Почему текущий запуск завершился ошибкой
+Эта версия работает как бесплатный Render Web Service и хранит очередь,
+шаблон и пресеты в постоянной базе Neon PostgreSQL.
 
-Render смог установить зависимости и запустить `bot.py`, но в загруженной
-версии репозитория не нашел файл `app/handlers.py`.
+## Перед обновлением
 
-В корне GitHub-репозитория должны находиться:
+Старая версия хранит очередь в локальном SQLite. Эти записи не переносятся в
+Neon автоматически. Перед новым деплоем откройте в боте `/queue` и запишите
+время важных публикаций или опубликуйте их заранее.
+
+## 1. Обновите файлы в GitHub
+
+Загрузите содержимое папки проекта в корень существующего репозитория с заменой
+старых файлов. На главной странице репозитория должны сразу быть видны:
 
 ```text
 bot.py
 requirements.txt
 render.yaml
+caption_template.txt
 app/
-  __init__.py
-  config.py
-  copywriter.py
-  formatting.py
-  handlers.py
-  models.py
-  publisher.py
-  scheduling.py
-  storage.py
 ```
 
-Не должно быть лишней внешней папки. При открытии репозитория на GitHub файл
-`bot.py` и папка `app` должны быть видны сразу.
+Внутри `app` должен быть новый файл `template_store.py`.
 
-## Правильная настройка бесплатного сервиса
+Не загружайте `.env`, `posts.sqlite3`, токен Telegram, ключ Gemini или строку
+подключения Neon.
 
-Проект подготовлен для бесплатного `Web Service`. Встроенная страница
-`/health` открывает обязательный порт Render, а Telegram-бот одновременно
-работает через polling.
+## 2. Создайте бесплатную базу Neon
 
-1. Загрузите в GitHub все файлы из этой папки.
-2. Убедитесь, что на GitHub открывается `app/handlers.py`.
-3. В Render выберите `New`, затем `Blueprint`.
-4. Подключите нужный GitHub-репозиторий.
-5. Render прочитает файл `render.yaml` и предложит создать бесплатный Web Service.
-6. Введите значения пяти закрытых переменных:
+1. Откройте `https://console.neon.tech` и зарегистрируйтесь.
+2. Нажмите `New Project` и создайте проект, например `taypa-bot`.
+3. На странице проекта нажмите `Connect`.
+4. Оставьте включенным `Connection pooling`.
+5. Скопируйте всю строку, которая начинается с `postgresql://`.
+
+Пример формата:
+
+```text
+postgresql://user:password@ep-example-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+```
+
+Официальная инструкция Neon:
+`https://neon.com/docs/connect/connect-from-any-app`
+
+## 3. Добавьте DATABASE_URL в Render
+
+1. Откройте существующий сервис `bot-y92e` в Render.
+2. Слева откройте `Environment`.
+3. Нажмите `Add Environment Variable`.
+4. В поле Key укажите `DATABASE_URL`.
+5. В Value вставьте скопированную строку Neon целиком.
+6. Нажмите `Save, rebuild, and deploy`.
+
+Остальные переменные оставьте без изменений:
 
 ```text
 TELEGRAM_BOT_TOKEN
@@ -45,45 +61,75 @@ GEMINI_API_KEY
 ADMIN_TELEGRAM_ID
 CHANNEL_ID
 CONTACT_USERNAME
+TIMEZONE
+GEMINI_MODEL
+BUTTON_TEXT
+COPY_LANGUAGE
 ```
 
-7. Подтвердите создание сервиса.
+Официальная инструкция Render:
+`https://render.com/docs/configure-environment-variables`
 
-`CHANNEL_ID` должен содержать username канала, например `@taypa_print`, а не
-username самого бота.
+## 4. Проверьте команды Render
 
-## Как понять, что все работает
+Build Command:
 
-Успешный журнал содержит примерно такие строки:
+```bash
+pip install -r requirements.txt
+```
+
+Start Command:
+
+```bash
+python bot.py
+```
+
+Health Check Path:
+
+```text
+/health
+```
+
+## 5. Проверьте запуск
+
+Успешный журнал содержит строки:
 
 ```text
 Render deploy check passed.
+Health server is listening on port 10000
 Start polling
 Run polling for bot
 ```
 
-В журнале также появится строка `Health server is listening on port 10000`.
+После запуска отправьте боту `/check`. Последняя строка должна быть:
+
+```text
+База: PostgreSQL
+```
+
+Если указано `База: SQLite`, переменная `DATABASE_URL` не сохранена или сервис
+не был заново развернут.
 
 ## Как не дать бесплатному сервису уснуть
 
-Render усыпляет бесплатный Web Service после 15 минут без входящих HTTP-запросов.
-Чтобы бот продолжал работать:
+Бесплатный Render Web Service засыпает после 15 минут без входящих запросов.
+Настройте внешний HTTP-монитор на адрес:
 
-1. Дождитесь успешного запуска и скопируйте адрес сервиса вида
-   `https://taypa-telegram-post-bot.onrender.com`.
-2. Зарегистрируйтесь бесплатно на `uptimerobot.com`.
-3. Нажмите `Add New Monitor`.
-4. Выберите тип `HTTP(s)`.
-5. Вставьте адрес с путем `/health`, например
-   `https://taypa-telegram-post-bot.onrender.com/health`.
-6. Выберите интервал 5 минут и сохраните монитор.
+```text
+https://bot-y92e.onrender.com/health
+```
 
-## Ограничения бесплатной версии
+Интервал проверки можно поставить 5 минут. Neon сохранит данные даже после
+засыпаний, перезапусков и новых деплоев Render.
 
-Бесплатная файловая система Render временная. После нового деплоя, перезапуска
-или полного засыпания может исчезнуть локальная очередь SQLite и измененный
-через Telegram шаблон. Основной шаблон из GitHub будет создан заново. Не
-планируйте критичные публикации на долгое время без проверки команды `/queue`.
+Ограничения бесплатного Render:
+`https://render.com/docs/free`
 
-Не добавляйте файл `.env` в GitHub. Токен Telegram и ключ Gemini вводятся только
-в разделе Environment на Render.
+## Новые возможности
+
+- Постоянная очередь, шаблон и пресеты в Neon.
+- Предпросмотр любого запланированного поста.
+- Изменение названия, описания, размеров, цены, даты и времени.
+- Публикация поста прямо из очереди.
+- Создание копии запланированного поста.
+- Готовые пресеты и добавление своих через `/presets`.
