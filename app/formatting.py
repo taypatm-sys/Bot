@@ -77,6 +77,30 @@ def render_caption(
     theme_hashtag: str = "",
 ) -> str:
     template = load_template(template_path)
+    return render_caption_text(
+        template,
+        title=title,
+        description=description,
+        size=size,
+        price=price,
+        garment_type=garment_type,
+        design_name=design_name,
+        theme_hashtag=theme_hashtag,
+    )
+
+
+def render_caption_text(
+    template: str,
+    *,
+    title: str,
+    description: str,
+    size: str,
+    price: str,
+    garment_type: str = "",
+    design_name: str = "",
+    theme_hashtag: str = "",
+) -> str:
+    validate_template(template)
     parsed_type, parsed_name = split_product_title(title)
     garment_type = clean_garment_type(garment_type or parsed_type)
     design_name = clean_design_name(design_name or parsed_name or title)

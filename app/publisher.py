@@ -6,8 +6,9 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Config
-from app.formatting import contact_link, render_caption
+from app.formatting import contact_link, render_caption_text
 from app.storage import PostRepository
+from app.template_store import CaptionTemplateStore
 
 
 logger = logging.getLogger(__name__)
@@ -15,10 +16,18 @@ UTC = timezone.utc
 
 
 class Publisher:
-    def __init__(self, *, bot: Bot, config: Config, repository: PostRepository):
+    def __init__(
+        self,
+        *,
+        bot: Bot,
+        config: Config,
+        repository: PostRepository,
+        template_store: CaptionTemplateStore,
+    ):
         self.bot = bot
         self.config = config
         self.repository = repository
+        self.template_store = template_store
         self.max_attempts = 5
 
     def public_keyboard(self, title: str) -> InlineKeyboardMarkup:
@@ -41,8 +50,8 @@ class Publisher:
             return False
 
         try:
-            caption = render_caption(
-                self.config.caption_template_path,
+            caption = render_caption_text(
+                self.template_store.get(),
                 title=post.title,
                 description=post.description,
                 size=post.size,

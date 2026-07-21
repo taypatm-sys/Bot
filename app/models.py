@@ -22,3 +22,11 @@ class ScheduledPost:
     last_error: Optional[str]
     published_message_id: Optional[int]
     created_at_utc: datetime
+
+
+@dataclass(frozen=True)
+class ProductPreset:
+    id: int
+    name: str
+    size: str
+    price: str

@@ -70,6 +70,7 @@ class Config:
     copy_language: str
     database_path: Path
     caption_template_path: Path
+    database_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -84,6 +85,12 @@ class Config:
         contact_username = _required("CONTACT_USERNAME").lstrip("@")
         if not contact_username.replace("_", "").isalnum():
             raise ConfigError("CONTACT_USERNAME указан неверно")
+
+        database_url = os.getenv("DATABASE_URL", "").strip()
+        if database_url and not database_url.startswith(
+            ("postgres://", "postgresql://")
+        ):
+            raise ConfigError("DATABASE_URL должен быть строкой подключения PostgreSQL")
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -101,14 +108,20 @@ class Config:
             caption_template_path=Path(
                 os.getenv("CAPTION_TEMPLATE_PATH", "caption_template.txt")
             ),
+            database_url=database_url,
         )
 
     @property
     def timezone(self) -> tzinfo:
         return _load_timezone(self.timezone_name)
 
+    @property
+    def database_source(self) -> Union[Path, str]:
+        return self.database_url or self.database_path
+
     def ensure_runtime_paths(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.database_url:
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.caption_template_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.caption_template_path.exists():
             if BUNDLED_CAPTION_TEMPLATE.exists():
