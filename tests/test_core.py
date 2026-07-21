@@ -13,11 +13,13 @@ from app.formatting import (
     normalize_price,
     normalize_size,
     render_caption,
+    render_caption_text,
     validate_template,
 )
 from app.health import build_health_app
 from app.scheduling import parse_local_datetime
 from app.storage import PostRepository
+from app.template_store import CaptionTemplateStore
 
 
 class FormattingTests(unittest.TestCase):
@@ -84,6 +86,19 @@ class FormattingTests(unittest.TestCase):
             self.assertIn('Футболка "Welcome to Turkmenistan"', caption)
             self.assertIn("👕 S-XXL", caption)
             self.assertIn("#Taýpa #футболка #туркменистан", caption)
+
+    def test_render_caption_from_persistent_template_text(self) -> None:
+        caption = render_caption_text(
+            "{title}\n{size}\n{price}\n{hashtags}",
+            title="Футболка Тест",
+            description="Описание",
+            size="S-XXL",
+            price="250 манат",
+            garment_type="Футболка",
+            design_name="Тест",
+            theme_hashtag="тест",
+        )
+        self.assertIn("#футболка #тест", caption)
 
 
 class CopywriterTests(unittest.TestCase):
@@ -251,6 +266,78 @@ class StorageTests(unittest.TestCase):
 
             self.assertTrue(repository.cancel(post_id))
             self.assertFalse(repository.cancel(post_id))
+
+    def test_template_is_persisted_in_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template_path = root / "caption.txt"
+            template_path.write_text(
+                "{title}\n{size}\n{price}\n{hashtags}", encoding="utf-8"
+            )
+            repository = PostRepository(root / "posts.sqlite3")
+            repository.initialize()
+            store = CaptionTemplateStore(
+                repository=repository,
+                fallback_path=template_path,
+            )
+            store.initialize()
+            store.set("{title}\nРазмер: {size}\n{price}\n{hashtags}")
+
+            second_store = CaptionTemplateStore(
+                repository=repository,
+                fallback_path=template_path,
+            )
+            second_store.initialize()
+            self.assertIn("Размер:", second_store.get())
+
+    def test_presets_can_be_seeded_added_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            repository.seed_presets((("Футболка", "S-XXL", "250 манат"),))
+            repository.seed_presets((("Не добавлять", "M", "1 манат"),))
+            presets = repository.list_presets()
+            self.assertEqual([item.name for item in presets], ["Футболка"])
+
+            preset_id = repository.create_preset(
+                name="Худи", size="S-2XL", price="460 манат"
+            )
+            self.assertEqual(repository.get_preset(preset_id).price, "460 манат")
+            self.assertTrue(repository.delete_preset(preset_id))
+            self.assertIsNone(repository.get_preset(preset_id))
+            restored_id = repository.create_preset(
+                name="Худи", size="M-2XL", price="510 манат"
+            )
+            self.assertEqual(restored_id, preset_id)
+            self.assertEqual(repository.get_preset(preset_id).price, "510 манат")
+
+    def test_pending_post_can_be_edited_and_rescheduled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            original_time = datetime.now(timezone.utc) + timedelta(hours=1)
+            post_id = repository.create(
+                author_id=123,
+                photo_file_id="photo-id",
+                title="Старое название",
+                description="Описание",
+                size="S-XXL",
+                price="250 манат",
+                scheduled_at_utc=original_time,
+            )
+            self.assertTrue(
+                repository.update_pending(
+                    post_id,
+                    title="Новое название",
+                    price="290 манат",
+                )
+            )
+            new_time = original_time + timedelta(days=1)
+            self.assertTrue(repository.reschedule(post_id, new_time))
+            post = repository.get(post_id)
+            self.assertEqual(post.title, "Новое название")
+            self.assertEqual(post.price, "290 манат")
+            self.assertEqual(post.scheduled_at_utc, new_time)
 
 
 if __name__ == "__main__":
