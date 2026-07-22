@@ -19,6 +19,7 @@ from google.genai import types
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
+from app.analysis_coordinator import AnalysisCoordinator
 from app.models import ReferenceAsset
 from app.storage import PostRepository
 
@@ -222,6 +223,7 @@ class ReferenceCatalog:
         min_pool_size: int = 20,
         analysis_timeout_seconds: float = 90.0,
         user_agent: str = "TaypaReferenceCatalog/4.0",
+        analysis_coordinator: Optional[AnalysisCoordinator] = None,
     ) -> None:
         self.repository = repository
         self.client = genai.Client(api_key=api_key)
@@ -232,6 +234,7 @@ class ReferenceCatalog:
         self.min_pool_size = max(1, min_pool_size)
         self.analysis_timeout_seconds = max(30.0, analysis_timeout_seconds)
         self.user_agent = user_agent
+        self.analysis_coordinator = analysis_coordinator
         self._wake_event = asyncio.Event()
         self._stop_event = asyncio.Event()
 
@@ -311,14 +314,25 @@ class ReferenceCatalog:
                     image_sha256=hashlib.sha256(image_bytes).hexdigest(),
                 )
             try:
-                tags = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._analyze_reference_sync,
-                        image_bytes,
-                        mime_type,
-                    ),
-                    timeout=self.analysis_timeout_seconds,
-                )
+                if self.analysis_coordinator is None:
+                    tags = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._analyze_reference_sync,
+                            image_bytes,
+                            mime_type,
+                        ),
+                        timeout=self.analysis_timeout_seconds,
+                    )
+                else:
+                    async with self.analysis_coordinator.background():
+                        tags = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._analyze_reference_sync,
+                                image_bytes,
+                                mime_type,
+                            ),
+                            timeout=self.analysis_timeout_seconds,
+                        )
             except asyncio.TimeoutError as error:
                 raise ReferenceImportError(
                     "Gemini не ответил вовремя",

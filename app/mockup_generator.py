@@ -4,13 +4,16 @@ import io
 import logging
 import random
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import AsyncIterator, Literal, Optional
 
 from google import genai
 from google.genai import types
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
+
+from app.analysis_coordinator import AnalysisCoordinator
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,31 @@ class _DetectedMockup(BaseModel):
     garment_panel_box: NormalizedBox
     print_box: NormalizedBox
     analysis_confidence: int = Field(ge=0, le=100)
+
+
+class _ResponseBox(BaseModel):
+    x: float = Field(description="Left edge as percent of the complete image")
+    y: float = Field(description="Top edge as percent of the complete image")
+    width: float = Field(description="Width as percent of the complete image")
+    height: float = Field(description="Height as percent of the complete image")
+
+
+class _DetectedMockupResponse(BaseModel):
+    """Loose API schema. Values are normalized locally before they are trusted."""
+
+    side: str
+    garment_type: str
+    shirt_color: str
+    fabric_finish: str
+    fit: str
+    target_gender: str
+    target_age_group: str
+    moods: list[str]
+    print_theme: str
+    construction_details: str
+    garment_panel_box: _ResponseBox
+    print_box: _ResponseBox
+    analysis_confidence: float
 
 
 class _DetectedPrint(BaseModel):
@@ -114,6 +142,208 @@ class PrintAssetSpec(BaseModel):
 
 def _clamp_int(value: float, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(round(value))))
+
+
+def _clean_token(value: str) -> str:
+    return " ".join(
+        value.strip().casefold().replace("_", " ").replace("-", " ").split()
+    )
+
+
+def _choice(
+    value: str,
+    *,
+    aliases: dict[str, str],
+    allowed: set[str],
+    default: str,
+) -> str:
+    clean = _clean_token(value)
+    direct = aliases.get(clean, clean.replace(" ", "-"))
+    return direct if direct in allowed else default
+
+
+def _box_from_response(box: _ResponseBox, *, minimum_size: float) -> NormalizedBox:
+    x = max(0.0, min(99.5, float(box.x)))
+    y = max(0.0, min(99.5, float(box.y)))
+    width = max(minimum_size, float(box.width))
+    height = max(minimum_size, float(box.height))
+    width = min(width, 100.0 - x)
+    height = min(height, 100.0 - y)
+    return NormalizedBox(x=x, y=y, width=width, height=height)
+
+
+def normalize_detected_mockup(raw: _DetectedMockupResponse) -> _DetectedMockup:
+    garment = _choice(
+        raw.garment_type,
+        aliases={
+            "tee": "t-shirt",
+            "t shirt": "t-shirt",
+            "tshirt": "t-shirt",
+            "shirt": "t-shirt",
+            "hooded sweatshirt": "hoodie",
+            "crewneck": "sweatshirt",
+            "crew neck sweatshirt": "sweatshirt",
+            "long sleeve shirt": "long-sleeve",
+            "longsleeve": "long-sleeve",
+            "zip hoodie": "zip-hoodie",
+            "zip up hoodie": "zip-hoodie",
+            "baseball cap": "cap",
+            "hat": "cap",
+        },
+        allowed={
+            "t-shirt",
+            "hoodie",
+            "sweatshirt",
+            "long-sleeve",
+            "zip-hoodie",
+            "cap",
+            "jacket",
+        },
+        default="t-shirt",
+    )
+    side = _choice(
+        raw.side,
+        aliases={"backside": "back", "rear": "back", "frontside": "front"},
+        allowed={"front", "back"},
+        default="front",
+    )
+    gender = _choice(
+        raw.target_gender,
+        aliases={
+            "female": "women",
+            "woman": "women",
+            "feminine": "women",
+            "male": "men",
+            "man": "men",
+            "masculine": "men",
+            "neutral": "unisex",
+            "universal": "unisex",
+        },
+        allowed={"women", "men", "unisex"},
+        default="unisex",
+    )
+    age = _choice(
+        raw.target_age_group,
+        aliases={
+            "18 to 24": "18-24",
+            "25 to 34": "25-34",
+            "35 to 44": "35-44",
+            "adult": "adult-universal",
+            "all adults": "adult-universal",
+            "adult universal": "adult-universal",
+        },
+        allowed={"18-24", "25-34", "35-44", "adult-universal"},
+        default="adult-universal",
+    )
+    mood_aliases = {
+        "quiet": "calm",
+        "soft": "calm",
+        "daring": "bold",
+        "edgy": "bold",
+        "warm": "cozy",
+        "athletic": "sporty",
+        "youthful": "youth",
+        "cute": "playful",
+        "fun": "playful",
+        "funny": "playful",
+        "humorous": "playful",
+        "clean": "minimal",
+        "luxury": "premium",
+        "urban": "street",
+        "streetwear": "street",
+    }
+    allowed_moods = {
+        "calm",
+        "bold",
+        "cozy",
+        "sporty",
+        "youth",
+        "romantic",
+        "playful",
+        "minimal",
+        "premium",
+        "street",
+    }
+    moods: list[str] = []
+    for value in raw.moods:
+        mood = _choice(
+            value,
+            aliases=mood_aliases,
+            allowed=allowed_moods,
+            default="",
+        )
+        if mood and mood not in moods:
+            moods.append(mood)
+    if not moods:
+        moods = ["minimal"]
+
+    garment_box = _box_from_response(raw.garment_panel_box, minimum_size=5.0)
+    print_box = _box_from_response(raw.print_box, minimum_size=0.5)
+    confidence = _clamp_int(float(raw.analysis_confidence), 0, 100)
+
+    return _DetectedMockup(
+        side=side,
+        garment_type=garment,
+        shirt_color=(raw.shirt_color.strip() or "unknown")[:80],
+        fabric_finish=(raw.fabric_finish.strip() or "fabric")[:100],
+        fit=(raw.fit.strip() or "regular")[:80],
+        target_gender=gender,
+        target_age_group=age,
+        moods=moods[:4],
+        print_theme=(raw.print_theme.strip() or "graphic print")[:140],
+        construction_details=(
+            raw.construction_details.strip() or "standard garment construction"
+        )[:160],
+        garment_panel_box=garment_box,
+        print_box=print_box,
+        analysis_confidence=confidence,
+    )
+
+
+@dataclass(frozen=True)
+class PreparedAnalysisImage:
+    data: bytes
+    mime_type: str
+    width: int
+    height: int
+
+
+def prepare_analysis_image(image_bytes: bytes) -> PreparedAnalysisImage:
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if min(image.size) < 240:
+                raise ValueError(
+                    "Макет слишком маленький. Нужна сторона не меньше 240 пикселей."
+                )
+            image.thumbnail((2400, 2400), Image.Resampling.LANCZOS)
+            width, height = image.size
+            if "A" in image.getbands():
+                rgba = image.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                image = Image.alpha_composite(background, rgba).convert("RGB")
+            else:
+                image = image.convert("RGB")
+    except ValueError:
+        raise
+    except (UnidentifiedImageError, OSError) as error:
+        raise ValueError("Не удалось открыть изображение макета.") from error
+
+    output = io.BytesIO()
+    image.save(
+        output,
+        format="JPEG",
+        quality=94,
+        subsampling=0,
+        optimize=True,
+    )
+    return PreparedAnalysisImage(
+        data=output.getvalue(),
+        mime_type="image/jpeg",
+        width=width,
+        height=height,
+    )
 
 
 def build_mockup_spec(
@@ -214,6 +444,12 @@ class GeneratedModelPhoto:
 
 
 class MockupGenerationError(RuntimeError):
+    def __init__(self, user_message: str):
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
+class MockupAnalysisError(RuntimeError):
     def __init__(self, user_message: str):
         super().__init__(user_message)
         self.user_message = user_message
@@ -625,64 +861,99 @@ class MockupGenerator:
         image_model: str,
         image_size: str,
         aspect_ratio: str = "4:5",
+        analysis_coordinator: Optional[AnalysisCoordinator] = None,
     ):
         self.client = genai.Client(api_key=api_key)
         self.analysis_model = analysis_model
         self.image_model = image_model
         self.image_size = image_size
         self.aspect_ratio = aspect_ratio
+        self.analysis_coordinator = analysis_coordinator
+
+    @asynccontextmanager
+    async def _interactive_analysis_slot(self) -> AsyncIterator[None]:
+        if self.analysis_coordinator is None:
+            yield
+            return
+        async with self.analysis_coordinator.interactive():
+            yield
 
     async def analyze_mockup(
         self,
         image_bytes: bytes,
         mime_type: str,
-    ) -> Optional[MockupSpec]:
+    ) -> MockupSpec:
+        del mime_type
         try:
-            return await asyncio.to_thread(
-                self._analyze_mockup_sync,
-                image_bytes,
-                mime_type,
-            )
-        except Exception:
-            logger.exception(
-                "Не удалось измерить макет, используется визуальный анализ"
-            )
-            return None
+            prepared = await asyncio.to_thread(prepare_analysis_image, image_bytes)
+        except ValueError as error:
+            raise MockupAnalysisError(str(error)) from error
+
+        last_error: Optional[Exception] = None
+        retry_delays = (0.0, 1.5, 4.0)
+        async with self._interactive_analysis_slot():
+            for attempt, delay in enumerate(retry_delays, start=1):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    return await asyncio.to_thread(
+                        self._analyze_mockup_sync,
+                        prepared.data,
+                        prepared.mime_type,
+                        prepared.width,
+                        prepared.height,
+                    )
+                except Exception as error:
+                    last_error = error
+                    logger.warning(
+                        "Попытка анализа макета %s из %s не удалась: %s: %s",
+                        attempt,
+                        len(retry_delays),
+                        type(error).__name__,
+                        error,
+                    )
+                    if not self._analysis_error_is_retryable(error):
+                        break
+
+        assert last_error is not None
+        logger.exception(
+            "Не удалось проанализировать макет после повторных попыток",
+            exc_info=(
+                type(last_error),
+                last_error,
+                last_error.__traceback__,
+            ),
+        )
+        raise self._friendly_analysis_error(last_error) from last_error
 
     def _analyze_mockup_sync(
         self,
         image_bytes: bytes,
         mime_type: str,
+        image_width: Optional[int] = None,
+        image_height: Optional[int] = None,
     ) -> MockupSpec:
-        try:
-            with Image.open(io.BytesIO(image_bytes)) as source:
-                source.load()
-                image_width, image_height = source.size
-        except (UnidentifiedImageError, OSError) as error:
-            raise ValueError("Не удалось открыть изображение макета") from error
+        if image_width is None or image_height is None:
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as source:
+                    source.load()
+                    image_width, image_height = source.size
+            except (UnidentifiedImageError, OSError) as error:
+                raise ValueError("Не удалось открыть изображение макета") from error
         prompt = (
-            "Analyze this clothing product mockup for a later deterministic placement "
-            "pipeline. Inspect only the physical "
-            "product and the DTF artwork placed on it. Ignore presentation graphics, "
-            "background, shadows and watermarks outside the product. Classify the "
-            "product as exactly one of: t-shirt, hoodie, sweatshirt, long-sleeve, "
-            "zip-hoodie, cap or jacket. Return whether the visible printed area is "
-            "front or back, the exact product color, material or fabric finish, fit "
-            "and a short description of construction details such as neckline, hood, "
-            "zip, panel seams, central cap seam and brim stitching. Return two normalized "
-            "boxes in percentages of the full supplied image. garment_panel_box is the "
-            "usable print-bearing torso panel from neckline to hem, excluding sleeves, "
-            "or the usable front crown panel for a cap. print_box is the tight bounding "
-            "box around the complete artwork including all letters and separate elements. "
-            "Do not use the entire canvas or garment sleeves as the panel box. The code "
-            "will calculate width, height and offsets from these boxes, so do not return "
-            "precomputed ratios. Also infer the intended wearer from "
-            "the artwork itself: women when a female figure or clearly feminine "
-            "styling dominates, men when a male figure or clearly masculine styling "
-            "dominates, and unisex only for a genuinely neutral design. Infer a broad "
-            "adult target age group and 1 to 4 mood tags from the allowed enum. Briefly "
-            "describe the print theme. Do not infer audience from the blank product cut. "
-            "analysis_confidence reflects visibility of the garment and artwork."
+            "Measure the clothing product and its DTF print in this mockup. Ignore every "
+            "background element outside the garment, including large pale letters, "
+            "logos, patterns, watermarks and shadows. garment_panel_box is the usable "
+            "print-bearing torso panel from neckline to hem without sleeves. For a cap, "
+            "it is the usable front crown panel. print_box is a tight box around the "
+            "complete printed artwork, including all text, outlines and detached parts. "
+            "For both boxes, x and y are the top-left corner and every number is a "
+            "percentage of the complete supplied image from 0 to 100. Classify the "
+            "garment as t-shirt, hoodie, sweatshirt, long-sleeve, zip-hoodie, cap or "
+            "jacket. Identify front or back, color, fabric finish, fit and construction. "
+            "Infer gender, adult age group, moods and theme from the print itself, not "
+            "from the blank garment. Keep all text fields short. Confidence describes "
+            "how clearly the garment and full print can be measured."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,
@@ -692,12 +963,19 @@ class MockupGenerator:
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=_DetectedMockup,
+                response_schema=_DetectedMockupResponse,
             ),
         )
-        if not response.text:
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, _DetectedMockupResponse):
+            raw = parsed
+        elif parsed is not None:
+            raw = _DetectedMockupResponse.model_validate(parsed)
+        elif response.text:
+            raw = _DetectedMockupResponse.model_validate_json(response.text)
+        else:
             raise RuntimeError("Gemini не вернул параметры макета")
-        detected = _DetectedMockup.model_validate_json(response.text)
+        detected = normalize_detected_mockup(raw)
         return build_mockup_spec(
             detected,
             image_width=image_width,
@@ -710,11 +988,12 @@ class MockupGenerator:
         mime_type: str,
     ) -> PrintAssetSpec:
         file_info = inspect_print_file(image_bytes)
-        detected = await asyncio.to_thread(
-            self._analyze_print_asset_sync,
-            image_bytes,
-            mime_type,
-        )
+        async with self._interactive_analysis_slot():
+            detected = await asyncio.to_thread(
+                self._analyze_print_asset_sync,
+                image_bytes,
+                mime_type,
+            )
         return PrintAssetSpec(
             **file_info,
             **detected.model_dump(),
@@ -746,9 +1025,79 @@ class MockupGenerator:
                 response_schema=_DetectedPrint,
             ),
         )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, _DetectedPrint):
+            return parsed
+        if parsed is not None:
+            return _DetectedPrint.model_validate(parsed)
         if not response.text:
             raise RuntimeError("Gemini не вернул анализ PNG принта")
         return _DetectedPrint.model_validate_json(response.text)
+
+    @staticmethod
+    def _analysis_error_is_retryable(error: Exception) -> bool:
+        code = getattr(error, "code", None)
+        message = str(error).upper()
+        if code in {400, 401, 403, 404}:
+            return False
+        if any(
+            marker in message
+            for marker in (
+                "INVALID_ARGUMENT",
+                "UNAUTHENTICATED",
+                "API_KEY_INVALID",
+                "INVALID API KEY",
+                "PERMISSION_DENIED",
+                "NOT_FOUND",
+                "SAFETY",
+                "BLOCKED",
+            )
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _friendly_analysis_error(error: Exception) -> MockupAnalysisError:
+        code = getattr(error, "code", None)
+        message = str(error).upper()
+        if code == 429 or "RESOURCE_EXHAUSTED" in message or "429" in message:
+            return MockupAnalysisError(
+                "Gemini временно достиг лимита анализа. Бот уже сделал несколько "
+                "попыток. Нажмите «Повторить анализ» через пару минут, отправлять "
+                "макет заново не нужно."
+            )
+        if code in {401, 403} or any(
+            marker in message
+            for marker in ("UNAUTHENTICATED", "API_KEY_INVALID", "INVALID API KEY")
+        ):
+            return MockupAnalysisError(
+                "Gemini API не принял ключ или у ключа нет доступа к модели анализа. "
+                "Проверьте GEMINI_API_KEY и GEMINI_MODEL в Render."
+            )
+        if code == 404 or "NOT_FOUND" in message:
+            return MockupAnalysisError(
+                "Модель анализа не найдена для этого ключа. Проверьте GEMINI_MODEL "
+                "в Render."
+            )
+        if code == 400 or "INVALID_ARGUMENT" in message:
+            return MockupAnalysisError(
+                "Gemini отклонил формат запроса анализа. Макет сохранен. Нажмите "
+                "«Повторить анализ» после установки исправленной версии."
+            )
+        if "SAFETY" in message or "BLOCK" in message:
+            return MockupAnalysisError(
+                "Gemini заблокировал анализ этого изображения фильтром безопасности. "
+                "Макет сохранен, его можно повторно проверить кнопкой ниже."
+            )
+        if "VALIDATION" in type(error).__name__.upper() or "JSON" in message:
+            return MockupAnalysisError(
+                "Gemini увидел макет, но вернул неполные параметры. Бот уже повторил "
+                "запрос. Нажмите «Повторить анализ», отправлять файл заново не нужно."
+            )
+        return MockupAnalysisError(
+            "Сервис анализа временно не ответил. Макет сохранен. Нажмите «Повторить "
+            "анализ», отправлять файл заново не нужно."
+        )
 
     async def generate_variant(
         self,

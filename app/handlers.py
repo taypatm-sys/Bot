@@ -30,6 +30,7 @@ from app.formatting import (
 )
 from app.models import ProductPreset, ScheduledPost
 from app.mockup_generator import (
+    MockupAnalysisError,
     MockupGenerationError,
     MockupGenerator,
     MockupSpec,
@@ -145,6 +146,29 @@ def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Все верно - создать фото",
                     callback_data="model:generate",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отправить другой макет",
+                    callback_data="model:restart",
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data="model:cancel",
+                ),
+            ],
+        ]
+    )
+
+
+def model_analysis_retry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Повторить анализ",
+                    callback_data="model:retry-analysis",
                 )
             ],
             [
@@ -569,21 +593,17 @@ def build_router(
         chat_id: int,
     ) -> dict:
         data = await state.get_data()
-        if data.get("model_source_file_id") and data.get("model_mockup_spec"):
+        if data.get("model_source_file_id"):
             return data
         saved = repository.get_model_draft(chat_id)
-        if (
-            saved
-            and saved.get("model_source_file_id")
-            and saved.get("model_mockup_spec")
-        ):
+        if saved and saved.get("model_source_file_id"):
             await state.update_data(**saved)
             return await state.get_data()
         return data
 
     async def save_model_draft(state: FSMContext, chat_id: int) -> None:
         data = await state.get_data()
-        if data.get("model_source_file_id") and data.get("model_mockup_spec"):
+        if data.get("model_source_file_id"):
             repository.save_model_draft(chat_id, data)
 
     def validated_mockup_spec(raw: dict) -> MockupSpec:
@@ -699,15 +719,16 @@ def build_router(
             await status_message.edit_text(
                 "Определяю пол модели, сторону, цвет, размер и положение принта..."
             )
-            spec = await asyncio.wait_for(
-                mockup_generator.analyze_mockup(source_bytes, source_mime_type),
-                timeout=config.mockup_analysis_timeout_seconds,
-            )
-            if spec is None:
+            try:
+                spec = await asyncio.wait_for(
+                    mockup_generator.analyze_mockup(source_bytes, source_mime_type),
+                    timeout=max(150.0, config.mockup_analysis_timeout_seconds),
+                )
+            except MockupAnalysisError as error:
                 await state.set_state(DraftStates.waiting_model_mockup)
                 await status_message.edit_text(
-                    "Не удалось надежно разобрать макет. Отправьте более четкое "
-                    "изображение вещи с принтом."
+                    error.user_message,
+                    reply_markup=model_analysis_retry_keyboard(),
                 )
                 return
             await state.update_data(model_mockup_spec=spec.model_dump())
@@ -1407,6 +1428,7 @@ def build_router(
             model_print_asset_spec=None,
             model_used_direction_labels=[],
         )
+        await save_model_draft(state, message.chat.id)
         await state.set_state(DraftStates.analyzing_model_mockup)
         status_message = await message.answer(
             "Макет принят. Анализирую изделие и измеряю принт. Платная генерация "
@@ -1420,28 +1442,39 @@ def build_router(
                     source_buffer.getvalue(),
                     mime_type,
                 ),
-                timeout=config.mockup_analysis_timeout_seconds,
+                timeout=max(150.0, config.mockup_analysis_timeout_seconds),
             )
         except asyncio.TimeoutError:
             logger.warning("Анализ макета превысил тайм-аут")
             await state.set_state(DraftStates.waiting_model_mockup)
             await status_message.edit_text(
-                "Анализ занял слишком много времени. Отправьте макет еще раз."
+                "Gemini слишком долго не отвечал. Макет сохранен. Нажмите «Повторить "
+                "анализ», отправлять файл заново не нужно.",
+                reply_markup=model_analysis_retry_keyboard(),
+            )
+            return
+        except MockupAnalysisError as error:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                error.user_message,
+                reply_markup=model_analysis_retry_keyboard(),
             )
             return
         except Exception:
             logger.exception("Не удалось проанализировать макет")
             await state.set_state(DraftStates.waiting_model_mockup)
             await status_message.edit_text(
-                "Не удалось открыть или проанализировать макет. Отправьте более "
-                "четкий PNG, JPEG или WEBP."
+                "Произошла техническая ошибка анализа. Макет сохранен. Нажмите "
+                "«Повторить анализ», отправлять файл заново не нужно.",
+                reply_markup=model_analysis_retry_keyboard(),
             )
             return
         if spec is None:
             await state.set_state(DraftStates.waiting_model_mockup)
             await status_message.edit_text(
-                "Не удалось надежно определить вещь и границы принта. Отправьте "
-                "более четкий макет без лишнего фона."
+                "Gemini вернул пустой результат анализа. Макет сохранен. Нажмите "
+                "«Повторить анализ», отправлять файл заново не нужно.",
+                reply_markup=model_analysis_retry_keyboard(),
             )
             return
 
@@ -1644,6 +1677,36 @@ def build_router(
             state=state,
             bot=bot,
             status_message=status_message,
+        )
+
+    @router.callback_query(F.data == "model:retry-analysis")
+    async def retry_model_analysis(
+        callback: CallbackQuery,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
+        file_id = data.get("model_source_file_id")
+        mime_type = data.get("model_source_mime_type", "image/jpeg")
+        if not file_id:
+            await callback.answer(
+                "Макет не найден, отправьте его еще раз",
+                show_alert=True,
+            )
+            return
+        await callback.answer("Повторяю анализ")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await accept_model_mockup(
+            callback.message,
+            state,
+            bot,
+            file_id=file_id,
+            mime_type=mime_type,
         )
 
     @router.callback_query(F.data == "model:restart")
