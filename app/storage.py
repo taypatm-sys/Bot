@@ -79,15 +79,11 @@ def _row_to_reference_job(row: Mapping[str, Any]) -> ReferenceImportJob:
         id=int(row["id"]),
         source_url=str(row["source_url"]),
         resolved_image_url=(
-            str(row["resolved_image_url"])
-            if row["resolved_image_url"]
-            else None
+            str(row["resolved_image_url"]) if row["resolved_image_url"] else None
         ),
         image_bytes=bytes(image_bytes) if image_bytes is not None else None,
         image_mime_type=(
-            str(row["image_mime_type"])
-            if row["image_mime_type"]
-            else None
+            str(row["image_mime_type"]) if row["image_mime_type"] else None
         ),
         attempt_count=int(row["attempt_count"]),
     )
@@ -183,8 +179,10 @@ class PostRepository:
         return connection.execute(self._sql(query), tuple(params))
 
     def initialize(self) -> None:
-        id_column = "BIGSERIAL PRIMARY KEY" if self.database_url else (
-            "INTEGER PRIMARY KEY AUTOINCREMENT"
+        id_column = (
+            "BIGSERIAL PRIMARY KEY"
+            if self.database_url
+            else ("INTEGER PRIMARY KEY AUTOINCREMENT")
         )
         binary_column = "BYTEA" if self.database_url else "BLOB"
         with self._connect() as connection:
@@ -395,24 +393,28 @@ class PostRepository:
     def _active_draft_key(chat_id: int) -> str:
         return f"active_draft:{chat_id}"
 
-    def save_active_draft(
+    @staticmethod
+    def _model_draft_key(chat_id: int) -> str:
+        return f"model_draft:{chat_id}"
+
+    def _save_expiring_draft(
         self,
-        chat_id: int,
+        key: str,
         data: Mapping[str, Any],
         *,
-        lifetime: timedelta = timedelta(hours=48),
+        lifetime: timedelta,
     ) -> None:
         payload = {
             "expires_at_utc": _iso(datetime.now(UTC) + lifetime),
             "data": dict(data),
         }
         self.set_setting(
-            self._active_draft_key(chat_id),
+            key,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         )
 
-    def get_active_draft(self, chat_id: int) -> Optional[dict[str, Any]]:
-        raw = self.get_setting(self._active_draft_key(chat_id))
+    def _get_expiring_draft(self, key: str) -> Optional[dict[str, Any]]:
+        raw = self.get_setting(key)
         if not raw:
             return None
         try:
@@ -422,12 +424,34 @@ class PostRepository:
             if not isinstance(data, dict):
                 raise ValueError("draft data must be an object")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            self.clear_active_draft(chat_id)
+            with self._connect() as connection:
+                self._execute(
+                    connection, "DELETE FROM app_settings WHERE key = ?", (key,)
+                )
             return None
         if expires_at <= datetime.now(UTC):
-            self.clear_active_draft(chat_id)
+            with self._connect() as connection:
+                self._execute(
+                    connection, "DELETE FROM app_settings WHERE key = ?", (key,)
+                )
             return None
         return data
+
+    def save_active_draft(
+        self,
+        chat_id: int,
+        data: Mapping[str, Any],
+        *,
+        lifetime: timedelta = timedelta(hours=48),
+    ) -> None:
+        self._save_expiring_draft(
+            self._active_draft_key(chat_id),
+            data,
+            lifetime=lifetime,
+        )
+
+    def get_active_draft(self, chat_id: int) -> Optional[dict[str, Any]]:
+        return self._get_expiring_draft(self._active_draft_key(chat_id))
 
     def clear_active_draft(self, chat_id: int) -> None:
         with self._connect() as connection:
@@ -435,6 +459,30 @@ class PostRepository:
                 connection,
                 "DELETE FROM app_settings WHERE key = ?",
                 (self._active_draft_key(chat_id),),
+            )
+
+    def save_model_draft(
+        self,
+        chat_id: int,
+        data: Mapping[str, Any],
+        *,
+        lifetime: timedelta = timedelta(hours=48),
+    ) -> None:
+        self._save_expiring_draft(
+            self._model_draft_key(chat_id),
+            data,
+            lifetime=lifetime,
+        )
+
+    def get_model_draft(self, chat_id: int) -> Optional[dict[str, Any]]:
+        return self._get_expiring_draft(self._model_draft_key(chat_id))
+
+    def clear_model_draft(self, chat_id: int) -> None:
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "DELETE FROM app_settings WHERE key = ?",
+                (self._model_draft_key(chat_id),),
             )
 
     def get_recent_mockup_directions(self, *, limit: int = 10) -> list[str]:
@@ -754,8 +802,7 @@ class PostRepository:
         return {
             "next_retry_at_utc": next_retry,
             "reasons": [
-                (str(row["last_error"]), int(row["amount"]))
-                for row in reason_rows
+                (str(row["last_error"]), int(row["amount"])) for row in reason_rows
             ],
         }
 
@@ -996,7 +1043,9 @@ class PostRepository:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)
             """
             if self.database_url:
-                row = self._execute(connection, query + " RETURNING id", params).fetchone()
+                row = self._execute(
+                    connection, query + " RETURNING id", params
+                ).fetchone()
                 return int(row["id"])
             cursor = self._execute(connection, query, params)
             return int(cursor.lastrowid)

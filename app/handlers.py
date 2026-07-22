@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import secrets
@@ -32,6 +33,7 @@ from app.mockup_generator import (
     MockupGenerationError,
     MockupGenerator,
     MockupSpec,
+    PrintAssetSpec,
     choose_photo_directions,
 )
 from app.publisher import Publisher
@@ -53,6 +55,9 @@ logger = logging.getLogger(__name__)
 
 class DraftStates(StatesGroup):
     waiting_model_mockup = State()
+    analyzing_model_mockup = State()
+    waiting_model_print = State()
+    model_analysis_ready = State()
     generating_model_photos = State()
     model_photos_ready = State()
     waiting_reference_list = State()
@@ -126,6 +131,109 @@ def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
     )
 
 
+def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
+    print_label = "Заменить PNG принта" if has_print else "Добавить PNG принта"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=print_label,
+                    callback_data="model:print",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Все верно - создать фото",
+                    callback_data="model:generate",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отправить другой макет",
+                    callback_data="model:restart",
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data="model:cancel",
+                ),
+            ],
+        ]
+    )
+
+
+_GARMENT_LABELS = {
+    "t-shirt": "футболка",
+    "hoodie": "худи",
+    "sweatshirt": "свитшот",
+    "long-sleeve": "лонгслив",
+    "zip-hoodie": "зип-худи",
+    "cap": "кепка",
+    "jacket": "куртка",
+}
+_GENDER_LABELS = {"women": "женская", "men": "мужская", "unisex": "унисекс"}
+_AGE_LABELS = {
+    "18-24": "18-24",
+    "25-34": "25-34",
+    "35-44": "35-44",
+    "adult-universal": "взрослая, без узкого возраста",
+}
+_MOOD_LABELS = {
+    "calm": "спокойное",
+    "bold": "дерзкое",
+    "cozy": "уютное",
+    "sporty": "спортивное",
+    "youth": "молодежное",
+    "romantic": "романтичное",
+    "playful": "игривое",
+    "minimal": "минималистичное",
+    "premium": "премиальное",
+    "street": "уличное",
+}
+
+
+def format_model_analysis(
+    spec: MockupSpec,
+    print_asset: PrintAssetSpec | None = None,
+) -> str:
+    mood_text = ", ".join(_MOOD_LABELS.get(item, item) for item in spec.moods)
+    side = "спереди" if spec.side == "front" else "сзади"
+    png_text = "не добавлен"
+    if print_asset:
+        transparency = (
+            "прозрачный фон есть"
+            if print_asset.has_transparency
+            else "прозрачного фона нет"
+        )
+        png_text = (
+            f"{print_asset.width_px}x{print_asset.height_px} px, {transparency}, "
+            f"видимая область {print_asset.content_width_px}x"
+            f"{print_asset.content_height_px} px"
+        )
+    return (
+        "Анализ макета готов\n\n"
+        f"Изделие: {_GARMENT_LABELS.get(spec.garment_type, spec.garment_type)}\n"
+        f"Сторона: {side}\n"
+        f"Цвет: {spec.shirt_color}\n"
+        f"Ткань: {spec.fabric_finish}\n"
+        f"Крой: {spec.fit}\n"
+        f"Конструкция: {spec.construction_details}\n\n"
+        f"Категория: {_GENDER_LABELS.get(spec.target_gender, spec.target_gender)}\n"
+        f"Возраст: {_AGE_LABELS.get(spec.target_age_group, spec.target_age_group)}\n"
+        f"Настроение: {mood_text}\n"
+        f"Тема принта: {spec.print_theme}\n\n"
+        "Размер относительно рабочей части изделия:\n"
+        f"- ширина принта: {spec.print_width_percent}%\n"
+        f"- высота принта: {spec.print_height_percent}%\n"
+        f"- отступ слева: {spec.print_left_offset_percent}%\n"
+        f"- отступ сверху: {spec.print_top_offset_percent}%\n"
+        f"- центр по ширине: {spec.print_center_x_percent}%\n\n"
+        f"Уверенность анализа: {spec.analysis_confidence}%\n"
+        f"Оригинальный PNG: {png_text}\n\n"
+        "Платная генерация еще не запускалась. Проверьте параметры, при желании "
+        "добавьте оригинальный PNG и только затем подтвердите создание фото."
+    )
+
+
 def references_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -186,9 +294,7 @@ def queue_schedule_keyboard(config: Config, post_id: int) -> InlineKeyboardMarku
             [
                 InlineKeyboardButton(
                     text=local.strftime("%d.%m в %H:%M"),
-                    callback_data=(
-                        f"queue:time:{post_id}:{to_utc_timestamp(value)}"
-                    ),
+                    callback_data=(f"queue:time:{post_id}:{to_utc_timestamp(value)}"),
                 )
             ]
         )
@@ -270,9 +376,7 @@ def preview_keyboard(config: Config, title: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="Подтвердить", callback_data="draft:confirm"),
-                InlineKeyboardButton(
-                    text="Название", callback_data="draft:text"
-                ),
+                InlineKeyboardButton(text="Название", callback_data="draft:text"),
             ],
             [
                 InlineKeyboardButton(
@@ -460,6 +564,41 @@ def build_router(
         if required_draft_fields.issubset(data):
             repository.save_active_draft(chat_id, data)
 
+    async def restore_model_draft(
+        state: FSMContext,
+        chat_id: int,
+    ) -> dict:
+        data = await state.get_data()
+        if data.get("model_source_file_id") and data.get("model_mockup_spec"):
+            return data
+        saved = repository.get_model_draft(chat_id)
+        if (
+            saved
+            and saved.get("model_source_file_id")
+            and saved.get("model_mockup_spec")
+        ):
+            await state.update_data(**saved)
+            return await state.get_data()
+        return data
+
+    async def save_model_draft(state: FSMContext, chat_id: int) -> None:
+        data = await state.get_data()
+        if data.get("model_source_file_id") and data.get("model_mockup_spec"):
+            repository.save_model_draft(chat_id, data)
+
+    def validated_mockup_spec(raw: dict) -> MockupSpec:
+        stored_spec = dict(raw)
+        if "print_top_offset_percent" not in stored_spec:
+            stored_spec["print_top_offset_percent"] = stored_spec.pop(
+                "print_top_from_collar_percent",
+                10,
+            )
+        stored_spec.setdefault(
+            "construction_details",
+            "standard garment construction from the source",
+        )
+        return MockupSpec.model_validate({"target_gender": "unisex", **stored_spec})
+
     async def prepare_post_draft(
         *,
         message: Message,
@@ -511,7 +650,7 @@ def build_router(
         bot: Bot,
         status_message: Message,
     ) -> None:
-        data = await state.get_data()
+        data = await restore_model_draft(state, message.chat.id)
         source_file_id = data.get("model_source_file_id")
         source_mime_type = data.get("model_source_mime_type", "image/jpeg")
         if not source_file_id:
@@ -534,32 +673,45 @@ def build_router(
             return
 
         source_bytes = source_buffer.getvalue()
+        print_bytes: bytes | None = None
+        print_mime_type: str | None = None
+        print_file_id = data.get("model_print_file_id")
+        if print_file_id:
+            print_buffer = io.BytesIO()
+            try:
+                await bot.download(print_file_id, destination=print_buffer)
+                print_bytes = print_buffer.getvalue()
+                print_mime_type = data.get("model_print_mime_type", "image/png")
+            except Exception:
+                logger.exception("Не удалось скачать отдельный PNG принта")
+                await state.set_state(DraftStates.model_analysis_ready)
+                await status_message.edit_text(
+                    "Не удалось скачать PNG принта из Telegram. Загрузите его еще раз "
+                    "или создайте фото без отдельного PNG.",
+                    reply_markup=model_analysis_keyboard(has_print=True),
+                )
+                return
+
         stored_spec = data.get("model_mockup_spec")
         if stored_spec:
-            stored_spec = dict(stored_spec)
-            if "print_top_offset_percent" not in stored_spec:
-                stored_spec["print_top_offset_percent"] = stored_spec.pop(
-                    "print_top_from_collar_percent",
-                    10,
-                )
-            stored_spec.setdefault(
-                "construction_details",
-                "standard garment construction from the source",
-            )
-            spec = MockupSpec.model_validate(
-                {"target_gender": "unisex", **stored_spec}
-            )
+            spec = validated_mockup_spec(stored_spec)
         else:
             await status_message.edit_text(
                 "Определяю пол модели, сторону, цвет, размер и положение принта..."
             )
-            spec = await mockup_generator.analyze_mockup(
-                source_bytes,
-                source_mime_type,
+            spec = await asyncio.wait_for(
+                mockup_generator.analyze_mockup(source_bytes, source_mime_type),
+                timeout=config.mockup_analysis_timeout_seconds,
             )
-            await state.update_data(
-                model_mockup_spec=spec.model_dump() if spec else None
-            )
+            if spec is None:
+                await state.set_state(DraftStates.waiting_model_mockup)
+                await status_message.edit_text(
+                    "Не удалось надежно разобрать макет. Отправьте более четкое "
+                    "изображение вещи с принтом."
+                )
+                return
+            await state.update_data(model_mockup_spec=spec.model_dump())
+            await save_model_draft(state, message.chat.id)
 
         batch_id = secrets.token_hex(4)
         used_labels = list(
@@ -595,6 +747,8 @@ def build_router(
                     spec=spec,
                     direction=direction,
                     request_token=batch_id,
+                    print_image_bytes=print_bytes,
+                    print_mime_type=print_mime_type,
                 )
             except MockupGenerationError as error:
                 generation_error = error.user_message
@@ -604,8 +758,7 @@ def build_router(
                 photo=BufferedInputFile(
                     generated_photo.data,
                     filename=(
-                        f"taypa_model_{batch_id}_{index}."
-                        f"{generated_photo.extension}"
+                        f"taypa_model_{batch_id}_{index}.{generated_photo.extension}"
                     ),
                 ),
                 caption=(
@@ -621,10 +774,12 @@ def build_router(
             repository.remember_mockup_direction(direction.label, limit=10)
 
         if not generated_file_ids:
-            await state.set_state(DraftStates.waiting_model_mockup)
+            await state.set_state(DraftStates.model_analysis_ready)
             await status_message.edit_text(
                 generation_error
-                or "Не удалось создать варианты. Отправьте макет еще раз."
+                or "Не удалось создать вариант. Анализ и макет сохранены, можно "
+                "попробовать еще раз.",
+                reply_markup=model_analysis_keyboard(has_print=bool(print_file_id)),
             )
             return
 
@@ -633,6 +788,7 @@ def build_router(
             model_generated_file_ids=generated_file_ids,
             model_used_direction_labels=used_labels,
         )
+        await save_model_draft(state, message.chat.id)
         await state.set_state(DraftStates.model_photos_ready)
         result_count = len(generated_file_ids)
         result_word = "вариант" if result_count == 1 else "варианта"
@@ -656,6 +812,7 @@ def build_router(
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
+        repository.clear_model_draft(message.chat.id)
         storage_note = (
             "Постоянная база подключена."
             if repository.is_persistent
@@ -674,6 +831,7 @@ def build_router(
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
+        repository.clear_model_draft(message.chat.id)
         await message.answer("Текущее действие отменено.", reply_markup=main_keyboard())
 
     @router.message(Command("check"))
@@ -803,7 +961,9 @@ def build_router(
             except UnicodeDecodeError:
                 text = raw.decode("utf-16")
         except (OSError, UnicodeError):
-            await message.answer("Не удалось прочитать TXT-файл. Сохраните его в UTF-8.")
+            await message.answer(
+                "Не удалось прочитать TXT-файл. Сохраните его в UTF-8."
+            )
             return
         await accept_reference_text(
             message,
@@ -945,7 +1105,9 @@ def build_router(
             design_name=design_name,
         )
         await state.clear()
-        await message.answer("Название обновлено." if updated else "Пост уже обработан.")
+        await message.answer(
+            "Название обновлено." if updated else "Пост уже обработан."
+        )
         if updated:
             await show_updated_queue_post(message, repository, config, post_id)
 
@@ -961,7 +1123,9 @@ def build_router(
         post_id = int(data["edit_post_id"])
         updated = repository.update_pending(post_id, description=description)
         await state.clear()
-        await message.answer("Описание обновлено." if updated else "Пост уже обработан.")
+        await message.answer(
+            "Описание обновлено." if updated else "Пост уже обработан."
+        )
         if updated:
             await show_updated_queue_post(message, repository, config, post_id)
 
@@ -1170,15 +1334,17 @@ def build_router(
         parts = [part.strip() for part in message.text.split("|")]
         if len(parts) != 3:
             await message.answer(
-                "Нужны три значения через знак |. Например:\n"
-                "Худи | S-2XL | 460"
+                "Нужны три значения через знак |. Например:\nХуди | S-2XL | 460"
             )
             return
         name, size_text, price_text = parts
         if not name or len(name) > 40:
             await message.answer("Название пресета должно содержать до 40 символов.")
             return
-        if any(item.name.casefold() == name.casefold() for item in repository.list_presets()):
+        if any(
+            item.name.casefold() == name.casefold()
+            for item in repository.list_presets()
+        ):
             await message.answer("Пресет с таким названием уже существует.")
             return
         try:
@@ -1211,16 +1377,14 @@ def build_router(
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
+        repository.clear_model_draft(message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
-        generation_count = (
-            "одно реалистичное фото"
-            if config.mockup_variants == 1
-            else f"{config.mockup_variants} разных реалистичных фото"
-        )
         await message.answer(
-            "Отправьте готовый макет одежды или кепки. Лучше отправить его как файл PNG или "
-            "JPEG, тогда мелкий текст и детали принта сохранятся точнее.\n\n"
-            f"Бот создаст {generation_count} 4:5 с физикой DTF."
+            "Шаг 1 из 2. Отправьте фото или макет вещи с уже размещенным принтом. "
+            "Лучше отправить его как файл PNG, JPEG или WEBP.\n\n"
+            "Сначала бот бесплатно определит изделие, цвет, крой, аудиторию, "
+            "настроение, размер и положение принта. Генерация фото начнется только "
+            "после вашего подтверждения."
         )
 
     async def accept_model_mockup(
@@ -1233,21 +1397,60 @@ def build_router(
     ) -> None:
         await state.clear()
         repository.clear_active_draft(message.chat.id)
+        repository.clear_model_draft(message.chat.id)
         await state.update_data(
             model_source_file_id=file_id,
             model_source_mime_type=mime_type,
             model_mockup_spec=None,
+            model_print_file_id=None,
+            model_print_mime_type=None,
+            model_print_asset_spec=None,
             model_used_direction_labels=[],
         )
+        await state.set_state(DraftStates.analyzing_model_mockup)
         status_message = await message.answer(
-            "Макет принят. Сначала определяю изделие и измеряю принт, затем создаю фотографию. "
-            "Это может занять несколько минут."
+            "Макет принят. Анализирую изделие и измеряю принт. Платная генерация "
+            "пока не запускается."
         )
-        await generate_model_batch(
-            message=message,
-            state=state,
-            bot=bot,
-            status_message=status_message,
+        source_buffer = io.BytesIO()
+        try:
+            await bot.download(file_id, destination=source_buffer)
+            spec = await asyncio.wait_for(
+                mockup_generator.analyze_mockup(
+                    source_buffer.getvalue(),
+                    mime_type,
+                ),
+                timeout=config.mockup_analysis_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Анализ макета превысил тайм-аут")
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Анализ занял слишком много времени. Отправьте макет еще раз."
+            )
+            return
+        except Exception:
+            logger.exception("Не удалось проанализировать макет")
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Не удалось открыть или проанализировать макет. Отправьте более "
+                "четкий PNG, JPEG или WEBP."
+            )
+            return
+        if spec is None:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Не удалось надежно определить вещь и границы принта. Отправьте "
+                "более четкий макет без лишнего фона."
+            )
+            return
+
+        await state.update_data(model_mockup_spec=spec.model_dump())
+        await state.set_state(DraftStates.model_analysis_ready)
+        await save_model_draft(state, message.chat.id)
+        await status_message.edit_text(
+            format_model_analysis(spec),
+            reply_markup=model_analysis_keyboard(has_print=False),
         )
 
     @router.message(DraftStates.waiting_model_mockup, F.photo)
@@ -1257,6 +1460,12 @@ def build_router(
         bot: Bot,
     ) -> None:
         if not await is_admin_message(message, config):
+            return
+        if (
+            message.photo[-1].file_size
+            and message.photo[-1].file_size > 20 * 1024 * 1024
+        ):
+            await message.answer("Файл слишком большой. Максимум 20 МБ.")
             return
         await accept_model_mockup(
             message,
@@ -1279,6 +1488,9 @@ def build_router(
         if not mime_type.startswith("image/"):
             await message.answer("Нужен файл изображения PNG, JPEG или WEBP.")
             return
+        if document.file_size and document.file_size > 20 * 1024 * 1024:
+            await message.answer("Файл слишком большой. Максимум 20 МБ.")
+            return
         await accept_model_mockup(
             message,
             state,
@@ -1286,6 +1498,187 @@ def build_router(
             file_id=document.file_id,
             mime_type=mime_type,
         )
+
+    @router.callback_query(F.data == "model:print")
+    async def request_model_print(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
+        if not data.get("model_mockup_spec"):
+            await callback.answer("Анализ макета не найден", show_alert=True)
+            return
+        await state.set_state(DraftStates.waiting_model_print)
+        await callback.answer()
+        await callback.message.answer(
+            "Шаг 2 из 2. Отправьте оригинальный принт отдельным PNG-файлом. "
+            "Не отправляйте его как фотографию, иначе Telegram уберет прозрачность.\n\n"
+            "PNG нужен для точных букв, цветов и мелких деталей. Если прозрачного "
+            "фона нет, бот предупредит об этом, но все равно сохранит файл."
+        )
+
+    @router.message(DraftStates.waiting_model_print, F.photo)
+    async def reject_model_print_photo(message: Message) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await message.answer(
+            "Отправьте принт именно как файл PNG, а не как сжатую фотографию."
+        )
+
+    @router.message(DraftStates.waiting_model_print, F.document)
+    async def receive_model_print(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_message(message, config):
+            return
+        document = message.document
+        filename = (document.file_name or "").casefold()
+        mime_type = (document.mime_type or "").casefold()
+        if mime_type != "image/png" and not filename.endswith(".png"):
+            await message.answer("Для оригинального принта нужен именно PNG-файл.")
+            return
+        if document.file_size and document.file_size > 20 * 1024 * 1024:
+            await message.answer("PNG слишком большой. Максимум 20 МБ.")
+            return
+
+        waiting = await message.answer(
+            "Проверяю прозрачность и анализирую сам принт. Платная генерация "
+            "пока не запускается."
+        )
+        buffer = io.BytesIO()
+        try:
+            await bot.download(document, destination=buffer)
+            print_asset = await asyncio.wait_for(
+                mockup_generator.analyze_print_asset(
+                    buffer.getvalue(),
+                    "image/png",
+                ),
+                timeout=config.mockup_analysis_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            await waiting.edit_text(
+                "Анализ PNG занял слишком много времени. Отправьте файл еще раз."
+            )
+            return
+        except ValueError as error:
+            await waiting.edit_text(str(error))
+            return
+        except Exception:
+            logger.exception("Не удалось проанализировать PNG принта")
+            await waiting.edit_text(
+                "Не удалось проанализировать PNG. Проверьте, что файл открывается, "
+                "и отправьте его еще раз."
+            )
+            return
+
+        data = await restore_model_draft(state, message.chat.id)
+        raw_spec = data.get("model_mockup_spec")
+        if not raw_spec:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await waiting.edit_text(
+                "Анализ вещи не найден. Сначала отправьте макет вещи с принтом."
+            )
+            return
+        spec = validated_mockup_spec(raw_spec).model_copy(
+            update={
+                "target_gender": print_asset.target_gender,
+                "target_age_group": print_asset.target_age_group,
+                "moods": print_asset.moods,
+                "print_theme": print_asset.print_theme,
+                "analysis_confidence": max(
+                    validated_mockup_spec(raw_spec).analysis_confidence,
+                    print_asset.analysis_confidence,
+                ),
+            }
+        )
+        await state.update_data(
+            model_print_file_id=document.file_id,
+            model_print_mime_type="image/png",
+            model_print_asset_spec=print_asset.model_dump(),
+            model_mockup_spec=spec.model_dump(),
+        )
+        await state.set_state(DraftStates.model_analysis_ready)
+        await save_model_draft(state, message.chat.id)
+        warning = ""
+        if not print_asset.has_transparency:
+            warning = (
+                "\n\nВнимание: у PNG нет прозрачного фона. На следующих этапах "
+                "фон придется удалять отдельно."
+            )
+        await waiting.edit_text(
+            format_model_analysis(spec, print_asset) + warning,
+            reply_markup=model_analysis_keyboard(has_print=True),
+        )
+
+    @router.callback_query(F.data == "model:generate")
+    async def confirm_model_generation(
+        callback: CallbackQuery,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
+        if not data.get("model_source_file_id") or not data.get("model_mockup_spec"):
+            await callback.answer("Анализ макета не найден", show_alert=True)
+            return
+        if await state.get_state() == DraftStates.generating_model_photos.state:
+            await callback.answer("Фотография уже создается", show_alert=True)
+            return
+        await callback.answer("Платная генерация запущена")
+        status_message = await callback.message.answer(
+            "Параметры подтверждены. Теперь запускаю одну платную генерацию 4:5."
+        )
+        await generate_model_batch(
+            message=callback.message,
+            state=state,
+            bot=bot,
+            status_message=status_message,
+        )
+
+    @router.callback_query(F.data == "model:restart")
+    async def restart_model_analysis(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        await state.clear()
+        repository.clear_model_draft(callback.message.chat.id)
+        await state.set_state(DraftStates.waiting_model_mockup)
+        await callback.answer()
+        await callback.message.answer(
+            "Отправьте другой макет вещи с уже размещенным принтом."
+        )
+
+    @router.callback_query(F.data == "model:cancel")
+    async def cancel_model_analysis(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        if callback.message:
+            repository.clear_model_draft(callback.message.chat.id)
+        await state.clear()
+        await callback.answer("Отменено")
+        if callback.message:
+            await callback.message.answer(
+                "Анализ отменен.", reply_markup=main_keyboard()
+            )
 
     @router.callback_query(F.data.startswith("model:more:"))
     async def more_model_photos(
@@ -1295,7 +1688,10 @@ def build_router(
     ) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
         batch_id = callback.data.rsplit(":", 1)[1]
         if data.get("model_batch_id") != batch_id:
             await callback.answer("Эта серия уже закрыта", show_alert=True)
@@ -1322,18 +1718,21 @@ def build_router(
     ) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
         batch_id = callback.data.rsplit(":", 1)[1]
         if data.get("model_batch_id") != batch_id:
             await callback.answer("Эта серия уже закрыта", show_alert=True)
             return
+        repository.clear_model_draft(callback.message.chat.id)
         await state.clear()
         await callback.answer("Готово")
-        if callback.message:
-            await callback.message.answer(
-                "Генерация завершена.",
-                reply_markup=main_keyboard(),
-            )
+        await callback.message.answer(
+            "Генерация завершена.",
+            reply_markup=main_keyboard(),
+        )
 
     @router.callback_query(F.data.startswith("model:post:"))
     async def post_from_model_photo(
@@ -1353,15 +1752,14 @@ def build_router(
         except ValueError:
             await callback.answer("Кнопка устарела", show_alert=True)
             return
-        data = await state.get_data()
+        if not callback.message:
+            await callback.answer()
+            return
+        data = await restore_model_draft(state, callback.message.chat.id)
         file_ids = data.get("model_generated_file_ids", [])
         if data.get("model_batch_id") != batch_id or not 0 <= index < len(file_ids):
             await callback.answer("Эта серия уже закрыта", show_alert=True)
             return
-        if not callback.message:
-            await callback.answer()
-            return
-
         selected_file_id = file_ids[index]
         await callback.answer("Фотография выбрана")
         waiting = await callback.message.answer(
@@ -1376,6 +1774,7 @@ def build_router(
                 "Не удалось скачать фотографию из Telegram. Выберите ее еще раз."
             )
             return
+        repository.clear_model_draft(callback.message.chat.id)
         await prepare_post_draft(
             message=callback.message,
             state=state,
@@ -1423,7 +1822,9 @@ def build_router(
     async def use_preset(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1445,7 +1846,9 @@ def build_router(
     ) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1461,7 +1864,9 @@ def build_router(
     async def choose_size(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         required = required_draft_fields
         if not required.issubset(data):
@@ -1527,7 +1932,9 @@ def build_router(
     async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         required = {"photo_file_id", "title", "description", "size", "price"}
         if not required.issubset(data):
@@ -1571,7 +1978,9 @@ def build_router(
     async def edit_text(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1580,7 +1989,7 @@ def build_router(
         await callback.answer()
         if callback.message:
             await callback.message.answer(
-                'Отправьте новую первую строку целиком. Например: '
+                "Отправьте новую первую строку целиком. Например: "
                 'Футболка "Welcome to Turkmenistan"'
             )
 
@@ -1605,7 +2014,9 @@ def build_router(
     async def edit_description(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1631,7 +2042,9 @@ def build_router(
     async def edit_size(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1647,7 +2060,9 @@ def build_router(
     async def edit_price(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1674,7 +2089,9 @@ def build_router(
     async def edit_time(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
@@ -1688,7 +2105,9 @@ def build_router(
         if not await is_admin_callback(callback, config):
             return
         await state.clear()
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         repository.clear_active_draft(chat_id)
         await callback.answer("Черновик удален")
         if callback.message:
@@ -1698,7 +2117,9 @@ def build_router(
     async def confirm_draft(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        chat_id = (
+            callback.message.chat.id if callback.message else callback.from_user.id
+        )
         data = await restore_active_draft(state, chat_id)
         required = {
             "photo_file_id",

@@ -121,6 +121,7 @@ class Config:
     reference_max_attempts: int = 5
     reference_min_pool_size: int = 20
     reference_analysis_timeout_seconds: float = 90.0
+    mockup_analysis_timeout_seconds: float = 90.0
     reference_user_agent: str = "TaypaReferenceCatalog/4.0"
 
     @classmethod
@@ -196,6 +197,11 @@ class Config:
             reference_analysis_timeout_seconds=_positive_float(
                 "REFERENCE_ANALYSIS_TIMEOUT_SECONDS",
                 os.getenv("REFERENCE_ANALYSIS_TIMEOUT_SECONDS", "90"),
+                90.0,
+            ),
+            mockup_analysis_timeout_seconds=_positive_float(
+                "MOCKUP_ANALYSIS_TIMEOUT_SECONDS",
+                os.getenv("MOCKUP_ANALYSIS_TIMEOUT_SECONDS", "90"),
                 90.0,
             ),
             reference_user_agent=(
