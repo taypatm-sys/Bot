@@ -28,7 +28,7 @@ services:
       - key: GEMINI_IMAGE_SIZE
         value: 1K
       - key: MOCKUP_VARIANTS
-        value: 3
+        value: 1
       - key: BUTTON_TEXT
         value: Написать
       - key: COPY_LANGUAGE
