@@ -94,6 +94,24 @@ class _DetectedMockupResponse(BaseModel):
     )
 
 
+class _DetectedMockupSemanticResponse(BaseModel):
+    """Semantic product analysis used when exact visual boxes are unreliable."""
+
+    side: str
+    garment_type: str
+    shirt_color: str
+    fabric_finish: str
+    fit: str
+    target_gender: str
+    target_age_group: str
+    moods: list[str]
+    print_theme: str
+    construction_details: str
+    analysis_confidence: float = Field(
+        description="Visual identification confidence from 0 to 100"
+    )
+
+
 class _DetectedPrint(BaseModel):
     target_gender: Literal["women", "men", "unisex"]
     target_age_group: TargetAgeGroup
@@ -125,6 +143,7 @@ class MockupSpec(BaseModel):
     garment_panel_box: Optional[NormalizedBox] = None
     print_box: Optional[NormalizedBox] = None
     geometry_validated: bool = False
+    geometry_mode: Literal["measured", "source-guided"] = "measured"
 
 
 class PrintAssetSpec(BaseModel):
@@ -438,6 +457,76 @@ def prepare_analysis_image(image_bytes: bytes) -> PreparedAnalysisImage:
     )
 
 
+def build_source_guided_mockup_spec(
+    raw: _DetectedMockupSemanticResponse,
+    *,
+    image_width: int,
+    image_height: int,
+) -> MockupSpec:
+    """Build a safe spec without pretending that Gemini measured pixel boxes.
+
+    The source product image itself remains authoritative during generation. The
+    percentages below are neutral placeholders and are never included in the image
+    prompt when geometry_mode is source-guided.
+    """
+    garment_kind = _choice(
+        raw.garment_type,
+        aliases={
+            "tee": "t-shirt",
+            "t shirt": "t-shirt",
+            "tshirt": "t-shirt",
+            "shirt": "t-shirt",
+            "hooded sweatshirt": "hoodie",
+            "crewneck": "sweatshirt",
+            "crew neck sweatshirt": "sweatshirt",
+            "long sleeve shirt": "long-sleeve",
+            "longsleeve": "long-sleeve",
+            "zip hoodie": "zip-hoodie",
+            "zip up hoodie": "zip-hoodie",
+            "baseball cap": "cap",
+            "hat": "cap",
+        },
+        allowed={
+            "t-shirt", "hoodie", "sweatshirt", "long-sleeve",
+            "zip-hoodie", "cap", "jacket",
+        },
+        default="t-shirt",
+    )
+    if garment_kind == "cap":
+        garment_box = _ResponseBox(x=25, y=15, width=50, height=45)
+        print_box = _ResponseBox(x=38, y=27, width=24, height=14)
+    else:
+        garment_box = _ResponseBox(x=20, y=7, width=60, height=90)
+        print_box = _ResponseBox(x=41, y=27, width=18, height=18)
+
+    proxy = _DetectedMockupResponse(
+        side=raw.side,
+        garment_type=raw.garment_type,
+        shirt_color=raw.shirt_color,
+        fabric_finish=raw.fabric_finish,
+        fit=raw.fit,
+        target_gender=raw.target_gender,
+        target_age_group=raw.target_age_group,
+        moods=raw.moods,
+        print_theme=raw.print_theme,
+        construction_details=raw.construction_details,
+        garment_panel_box=garment_box,
+        print_box=print_box,
+        analysis_confidence=max(55.0, min(100.0, float(raw.analysis_confidence))),
+    )
+    detected = normalize_detected_mockup(
+        proxy,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    spec = build_mockup_spec(
+        detected,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    return spec.model_copy(update={"geometry_mode": "source-guided"})
+
+
 def build_mockup_spec(
     detected: _DetectedMockup,
     *,
@@ -510,6 +599,12 @@ def build_mockup_spec(
 
 
 def mockup_spec_validation_issue(spec: MockupSpec) -> Optional[str]:
+    if spec.geometry_mode == "source-guided":
+        if not 1 <= spec.print_width_percent <= 100:
+            return "некорректная резервная ширина принта"
+        if not 1 <= spec.print_height_percent <= 100:
+            return "некорректная резервная высота принта"
+        return None
     if not spec.geometry_validated:
         return "анализ создан старой версией без проверки геометрии"
     if spec.analysis_confidence < MIN_MOCKUP_ANALYSIS_CONFIDENCE:
@@ -850,7 +945,19 @@ def build_model_photo_prompt(
         is_cap = False
     else:
         is_cap = spec.garment_type == "cap"
-        if is_cap:
+        if spec.geometry_mode == "source-guided":
+            measurements = (
+                f"The printed side is the {spec.side}. The garment is a "
+                f"{spec.garment_type}, color: {spec.shirt_color}, fabric finish: "
+                f"{spec.fabric_finish}, fit: {spec.fit}. Construction: "
+                f"{spec.construction_details}. Do not use estimated numeric boxes. "
+                "Visually copy the exact print scale, center, top offset and placement "
+                "directly from Image 1. The visible product source is authoritative. "
+                f"The intended wearer is {spec.target_gender}, target age group "
+                f"{spec.target_age_group}. The artwork mood tags are "
+                f"{', '.join(spec.moods)}."
+            )
+        elif is_cap:
             measurements = (
                 f"This is a {spec.garment_type}, color: {spec.shirt_color}, material "
                 f"and finish: {spec.fabric_finish}, fit and shape: {spec.fit}. The "
@@ -1129,6 +1236,24 @@ class MockupGenerator:
                         break
 
         assert last_error is not None
+        if isinstance(last_error, MockupGeometryError):
+            logger.warning(
+                "Точные границы не определены. Перехожу в source-guided режим без "
+                "блокировки генерации: %s",
+                last_error,
+            )
+            try:
+                return await asyncio.to_thread(
+                    self._analyze_mockup_source_guided_sync,
+                    prepared.data,
+                    prepared.mime_type,
+                    prepared.width,
+                    prepared.height,
+                )
+            except Exception as fallback_error:
+                last_error = fallback_error
+                logger.exception("Не удалось выполнить резервный анализ макета")
+
         logger.exception(
             "Не удалось проанализировать макет после повторных попыток",
             exc_info=(
@@ -1138,6 +1263,49 @@ class MockupGenerator:
             ),
         )
         raise self._friendly_analysis_error(last_error) from last_error
+
+    def _analyze_mockup_source_guided_sync(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        image_width: int,
+        image_height: int,
+    ) -> MockupSpec:
+        prompt = (
+            "Identify this clothing product without measuring pixel boxes. Ignore the "
+            "presentation background, watermarks, pale background letters and shadows. "
+            "Classify the garment as t-shirt, hoodie, sweatshirt, long-sleeve, "
+            "zip-hoodie, cap or jacket. Identify front or back, exact visible garment "
+            "color, fabric finish, fit and construction. Infer adult audience, moods "
+            "and print theme from the artwork. Keep text fields short. The original "
+            "product image will be supplied directly to the image generator and will "
+            "control exact print size and placement, so do not estimate coordinates."
+        )
+        response = self.client.models.generate_content(
+            model=self.analysis_model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_DetectedMockupSemanticResponse,
+            ),
+        )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, _DetectedMockupSemanticResponse):
+            raw = parsed
+        elif parsed is not None:
+            raw = _DetectedMockupSemanticResponse.model_validate(parsed)
+        elif response.text:
+            raw = _DetectedMockupSemanticResponse.model_validate_json(response.text)
+        else:
+            raise RuntimeError("Gemini не вернул параметры изделия")
+        return build_source_guided_mockup_spec(
+            raw,
+            image_width=image_width,
+            image_height=image_height,
+        )
 
     def _analyze_mockup_sync(
         self,
@@ -1292,10 +1460,9 @@ class MockupGenerator:
         message = str(error).upper()
         if isinstance(error, MockupGeometryError):
             return MockupAnalysisError(
-                "Gemini увидел вещь, но после трех проверок не смог надежно измерить "
-                "границы принта. Платная генерация заблокирована, чтобы не разместить "
-                "принт неправильно. Макет сохранен. Нажмите «Повторить анализ», "
-                "отправлять файл заново не нужно."
+                "Gemini увидел вещь, но не смог определить параметры изделия. "
+                "Макет сохранен. Нажмите «Повторить анализ», отправлять файл заново "
+                "не нужно."
             )
         if code == 429 or "RESOURCE_EXHAUSTED" in message or "429" in message:
             return MockupAnalysisError(

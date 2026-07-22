@@ -234,6 +234,21 @@ def format_model_analysis(
             f"видимая область {print_asset.content_width_px}x"
             f"{print_asset.content_height_px} px"
         )
+    if spec.geometry_mode == "source-guided":
+        geometry_text = (
+            "Положение принта: беру напрямую из исходного фото\n"
+            "Точное измерение границ не требуется\n"
+        )
+    else:
+        geometry_text = (
+            "Размер относительно рабочей части изделия:\n"
+            f"- ширина принта: {spec.print_width_percent}%\n"
+            f"- высота принта: {spec.print_height_percent}%\n"
+            f"- отступ слева: {spec.print_left_offset_percent}%\n"
+            f"- отступ сверху: {spec.print_top_offset_percent}%\n"
+            f"- центр по ширине: {spec.print_center_x_percent}%\n"
+            f"Уверенность измерения принта: {spec.analysis_confidence}%\n"
+        )
     return (
         "Анализ макета готов\n\n"
         f"Изделие: {_GARMENT_LABELS.get(spec.garment_type, spec.garment_type)}\n"
@@ -246,13 +261,7 @@ def format_model_analysis(
         f"Возраст: {_AGE_LABELS.get(spec.target_age_group, spec.target_age_group)}\n"
         f"Настроение: {mood_text}\n"
         f"Тема принта: {spec.print_theme}\n\n"
-        "Размер относительно рабочей части изделия:\n"
-        f"- ширина принта: {spec.print_width_percent}%\n"
-        f"- высота принта: {spec.print_height_percent}%\n"
-        f"- отступ слева: {spec.print_left_offset_percent}%\n"
-        f"- отступ сверху: {spec.print_top_offset_percent}%\n"
-        f"- центр по ширине: {spec.print_center_x_percent}%\n\n"
-        f"Уверенность измерения принта: {spec.analysis_confidence}%\n"
+        f"{geometry_text}\n"
         f"Оригинальный PNG: {png_text}\n\n"
         "Платная генерация еще не запускалась. Проверьте параметры, при желании "
         "добавьте оригинальный PNG и только затем подтвердите создание фото."
@@ -1497,8 +1506,8 @@ def build_router(
         await save_model_draft(state, message.chat.id)
         await state.set_state(DraftStates.analyzing_model_mockup)
         status_message = await message.answer(
-            "Макет принят. Анализирую изделие и измеряю принт. Платная генерация "
-            "пока не запускается."
+            "Макет принят. Анализирую изделие и положение принта. Платная "
+            "генерация пока не запускается."
         )
         source_buffer = io.BytesIO()
         try:
