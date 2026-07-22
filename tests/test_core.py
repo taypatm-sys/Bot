@@ -406,6 +406,24 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertIn("Two source images are supplied", prompt)
         self.assertIn("second image is the exact high-quality print source", prompt)
 
+    def test_prompt_requires_manual_reference_and_close_framing(self) -> None:
+        direction = choose_photo_directions(1, random.Random(19))[0]
+        prompt = build_model_photo_prompt(
+            None,
+            direction,
+            "manual-reference",
+            has_style_reference=True,
+            style_reference_tags={
+                "framing": "waist-up",
+                "camera_angle": "front",
+                "setting": "plain wall",
+            },
+        )
+        self.assertIn("manually selected photographic reference", prompt)
+        self.assertIn("No crowd", prompt)
+        self.assertIn("75 to 90 percent", prompt)
+        self.assertIn("waist-up", prompt)
+
     def test_batch_uses_distinct_people_and_scenes(self) -> None:
         directions = choose_photo_directions(4, random.Random(42))
         self.assertEqual(len(directions), 4)
@@ -586,6 +604,47 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertEqual(len(contents), 4)
         self.assertIn("Two source images are supplied", contents[0])
         self.assertEqual(contents[3].inline_data.mime_type, "image/png")
+
+    def test_generation_sends_manual_reference_as_final_source(self) -> None:
+        class FakeModels:
+            kwargs = None
+
+            def generate_content(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"jpeg-data",
+                                mime_type="image/jpeg",
+                            )
+                        )
+                    ]
+                )
+
+        generator = object.__new__(MockupGenerator)
+        generator.client = SimpleNamespace(models=FakeModels())
+        generator.image_model = "gemini-3.1-flash-image"
+        generator.image_size = "1K"
+        generator.aspect_ratio = "4:5"
+        direction = choose_photo_directions(1, random.Random(14))[0]
+
+        generator._generate_variant_sync(
+            b"garment-image",
+            "image/jpeg",
+            None,
+            direction,
+            "batch",
+            reference_image_bytes=b"manual-reference",
+            reference_mime_type="image/jpeg",
+            reference_tags={"framing": "waist-up"},
+        )
+
+        contents = generator.client.models.kwargs["contents"]
+        self.assertEqual(len(contents), 4)
+        self.assertIn("manually selected photographic reference", contents[0])
+        self.assertEqual(contents[-1].inline_data.data, b"manual-reference")
+        self.assertEqual(contents[-1].inline_data.mime_type, "image/jpeg")
 
     def test_invalid_argument_error_is_explained(self) -> None:
         class FakeInvalidArgument(Exception):
