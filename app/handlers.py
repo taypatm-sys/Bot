@@ -134,19 +134,23 @@ def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
 
 
 def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
-    print_label = "Заменить PNG принта" if has_print else "Добавить PNG принта"
+    print_label = (
+        "Заменить дополнительный PNG"
+        if has_print
+        else "Добавить PNG принта - необязательно"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=print_label,
-                    callback_data="model:print",
+                    text="Все верно - создать фото",
+                    callback_data="model:generate",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Все верно - создать фото",
-                    callback_data="model:generate",
+                    text=print_label,
+                    callback_data="model:print",
                 )
             ],
             [
@@ -222,7 +226,8 @@ def format_model_analysis(
 ) -> str:
     mood_text = ", ".join(_MOOD_LABELS.get(item, item) for item in spec.moods)
     side = "спереди" if spec.side == "front" else "сзади"
-    png_text = "не добавлен"
+    png_text = "не добавлен - не требуется"
+    print_source_text = "исходное фото товара"
     if print_asset:
         transparency = (
             "прозрачный фон есть"
@@ -230,10 +235,11 @@ def format_model_analysis(
             else "прозрачного фона нет"
         )
         png_text = (
-            f"{print_asset.width_px}x{print_asset.height_px} px, {transparency}, "
-            f"видимая область {print_asset.content_width_px}x"
+            f"добавлен, {print_asset.width_px}x{print_asset.height_px} px, "
+            f"{transparency}, видимая область {print_asset.content_width_px}x"
             f"{print_asset.content_height_px} px"
         )
+        print_source_text = "исходное фото товара + отдельный PNG"
     if spec.geometry_mode == "source-guided":
         geometry_text = (
             "Положение принта: беру напрямую из исходного фото\n"
@@ -262,9 +268,10 @@ def format_model_analysis(
         f"Настроение: {mood_text}\n"
         f"Тема принта: {spec.print_theme}\n\n"
         f"{geometry_text}\n"
-        f"Оригинальный PNG: {png_text}\n\n"
-        "Платная генерация еще не запускалась. Проверьте параметры, при желании "
-        "добавьте оригинальный PNG и только затем подтвердите создание фото."
+        f"Источник принта: {print_source_text}\n"
+        f"Отдельный PNG: {png_text}\n\n"
+        "Платная генерация еще не запускалась. Проверьте параметры и подтвердите "
+        "создание фото. Отдельный PNG можно добавить только при необходимости."
     )
 
 
@@ -1476,11 +1483,11 @@ def build_router(
         repository.clear_model_draft(message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
         await message.answer(
-            "Шаг 1 из 2. Отправьте фото или макет вещи с уже размещенным принтом. "
+            "Отправьте фото или макет вещи с уже размещенным принтом. "
             "Лучше отправить его как файл PNG, JPEG или WEBP.\n\n"
-            "Сначала бот бесплатно определит изделие, цвет, крой, аудиторию, "
-            "настроение, размер и положение принта. Генерация фото начнется только "
-            "после вашего подтверждения."
+            "Исходное фото будет главным источником цвета, ткани, формы и принта. "
+            "Отдельный PNG принта не требуется. Генерация начнется только после "
+            "вашего подтверждения."
         )
 
     async def accept_model_mockup(
@@ -1638,10 +1645,10 @@ def build_router(
         await state.set_state(DraftStates.waiting_model_print)
         await callback.answer()
         await callback.message.answer(
-            "Шаг 2 из 2. Отправьте оригинальный принт отдельным PNG-файлом. "
-            "Не отправляйте его как фотографию, иначе Telegram уберет прозрачность.\n\n"
-            "PNG нужен для точных букв, цветов и мелких деталей. Если прозрачного "
-            "фона нет, бот предупредит об этом, но все равно сохранит файл."
+            "Необязательный шаг. Отправьте оригинальный принт отдельным PNG-файлом, "
+            "только если он у вас есть и нужен для более точных букв или мелких "
+            "деталей. Без PNG бот использует принт прямо с исходного фото товара.\n\n"
+            "Отправляйте PNG как файл, иначе Telegram уберет прозрачность."
         )
 
     @router.message(DraftStates.waiting_model_print, F.photo)
