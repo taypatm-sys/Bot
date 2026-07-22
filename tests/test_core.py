@@ -1,3 +1,4 @@
+import io
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,8 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from PIL import Image
 
 from app.config import (
     Config,
@@ -27,10 +30,14 @@ from app.formatting import (
 )
 from app.health import build_health_app
 from app.mockup_generator import (
+    NormalizedBox,
     MockupGenerator,
     MockupSpec,
+    _DetectedMockup,
+    build_mockup_spec,
     build_model_photo_prompt,
     choose_photo_directions,
+    inspect_print_file,
 )
 from app.reference_catalog import ReferenceCatalog, normalize_reference_urls
 from app.scheduling import parse_local_datetime
@@ -84,9 +91,9 @@ class FormattingTests(unittest.TestCase):
             path = Path(directory) / "template.txt"
             path.write_text(
                 '{Тип товара} "{Название принта}"\n\n'
-                '{Короткое описание, передающее настроение принта}\n\n'
-                '👕 {Размеры}\n\n💸 {Цена}\n\n'
-                '#Taýpa #{тип товара} #{тематика принта}',
+                "{Короткое описание, передающее настроение принта}\n\n"
+                "👕 {Размеры}\n\n💸 {Цена}\n\n"
+                "#Taýpa #{тип товара} #{тематика принта}",
                 encoding="utf-8",
             )
             caption = render_caption(
@@ -121,7 +128,7 @@ class CopywriterTests(unittest.TestCase):
     def test_product_title_contains_garment_and_quoted_name(self) -> None:
         product = ProductCopy(
             garment_type="Худи",
-            design_name='“Soul of Karakum”',
+            design_name="“Soul of Karakum”",
             mood_description="Стиль с характером",
             theme_hashtag="#Karakum Spirit",
         )
@@ -148,6 +155,61 @@ class CopywriterTests(unittest.TestCase):
 
 
 class MockupGeneratorTests(unittest.TestCase):
+    def test_algorithm_derives_relative_print_placement_from_boxes(self) -> None:
+        detected = _DetectedMockup(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="beige",
+            fabric_finish="cotton jersey",
+            fit="relaxed",
+            target_gender="women",
+            target_age_group="18-24",
+            moods=["playful", "youth"],
+            print_theme="illustrated character",
+            construction_details="crew neck and short sleeves",
+            garment_panel_box=NormalizedBox(x=10, y=20, width=80, height=60),
+            print_box=NormalizedBox(x=42, y=26, width=16, height=18),
+            analysis_confidence=91,
+        )
+
+        spec = build_mockup_spec(
+            detected,
+            image_width=2000,
+            image_height=2000,
+        )
+
+        self.assertEqual(spec.print_width_percent, 20)
+        self.assertEqual(spec.print_height_percent, 30)
+        self.assertEqual(spec.print_left_offset_percent, 40)
+        self.assertEqual(spec.print_top_offset_percent, 10)
+        self.assertEqual(spec.print_center_x_percent, 50)
+        self.assertEqual(spec.source_image_width_px, 2000)
+
+    def test_print_png_transparency_and_visible_bounds_are_measured(self) -> None:
+        image = Image.new("RGBA", (100, 50), (0, 0, 0, 0))
+        image.paste((255, 0, 0, 255), (10, 5, 90, 45))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+
+        info = inspect_print_file(buffer.getvalue())
+
+        self.assertTrue(info["has_transparency"])
+        self.assertEqual(info["content_x_px"], 10)
+        self.assertEqual(info["content_y_px"], 5)
+        self.assertEqual(info["content_width_px"], 80)
+        self.assertEqual(info["content_height_px"], 40)
+
+    def test_prompt_distinguishes_placement_reference_and_exact_png(self) -> None:
+        direction = choose_photo_directions(1, random.Random(18))[0]
+        prompt = build_model_photo_prompt(
+            None,
+            direction,
+            "two-sources",
+            has_separate_print=True,
+        )
+        self.assertIn("Two source images are supplied", prompt)
+        self.assertIn("second image is the exact high-quality print source", prompt)
+
     def test_batch_uses_distinct_people_and_scenes(self) -> None:
         directions = choose_photo_directions(4, random.Random(42))
         self.assertEqual(len(directions), 4)
@@ -290,6 +352,45 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertNotIn("outputCompressionQuality", dumped["imageConfig"])
         self.assertNotIn("seed", dumped)
 
+    def test_generation_sends_exact_png_as_second_source(self) -> None:
+        class FakeModels:
+            kwargs = None
+
+            def generate_content(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"jpeg-data",
+                                mime_type="image/jpeg",
+                            )
+                        )
+                    ]
+                )
+
+        generator = object.__new__(MockupGenerator)
+        generator.client = SimpleNamespace(models=FakeModels())
+        generator.image_model = "gemini-3.1-flash-image"
+        generator.image_size = "1K"
+        generator.aspect_ratio = "4:5"
+        direction = choose_photo_directions(1, random.Random(12))[0]
+
+        generator._generate_variant_sync(
+            b"garment-image",
+            "image/jpeg",
+            None,
+            direction,
+            "batch",
+            b"exact-print",
+            "image/png",
+        )
+
+        contents = generator.client.models.kwargs["contents"]
+        self.assertEqual(len(contents), 4)
+        self.assertIn("Two source images are supplied", contents[0])
+        self.assertEqual(contents[3].inline_data.mime_type, "image/png")
+
     def test_invalid_argument_error_is_explained(self) -> None:
         class FakeInvalidArgument(Exception):
             code = 400
@@ -351,7 +452,9 @@ class ConfigTests(unittest.TestCase):
 
 class HealthTests(unittest.TestCase):
     def test_render_health_routes_exist(self) -> None:
-        paths = {route.resource.canonical for route in build_health_app().router.routes()}
+        paths = {
+            route.resource.canonical for route in build_health_app().router.routes()
+        }
         self.assertTrue({"/", "/health"}.issubset(paths))
 
 
@@ -567,13 +670,13 @@ class StorageTests(unittest.TestCase):
             repository.initialize()
             with sqlite3.connect(path) as connection:
                 columns = {
-                    row[1] for row in connection.execute(
-                        "PRAGMA table_info(scheduled_posts)"
-                    )
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(scheduled_posts)")
                 }
             self.assertTrue(
-                {"size", "garment_type", "design_name", "theme_hashtag"}
-                .issubset(columns)
+                {"size", "garment_type", "design_name", "theme_hashtag"}.issubset(
+                    columns
+                )
             )
 
     def test_post_lifecycle(self) -> None:
@@ -685,6 +788,30 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(draft["photo_file_id"], "telegram-file")
             second.clear_active_draft(123)
             self.assertIsNone(second.get_active_draft(123))
+
+    def test_model_analysis_draft_survives_repository_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "posts.sqlite3"
+            first = PostRepository(path)
+            first.initialize()
+            first.save_model_draft(
+                321,
+                {
+                    "model_source_file_id": "garment-file",
+                    "model_print_file_id": "print-file",
+                    "model_mockup_spec": {"garment_type": "t-shirt"},
+                },
+            )
+            first.close()
+
+            second = PostRepository(path)
+            second.initialize()
+            draft = second.get_model_draft(321)
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft["model_source_file_id"], "garment-file")
+            self.assertEqual(draft["model_print_file_id"], "print-file")
+            second.clear_model_draft(321)
+            self.assertIsNone(second.get_model_draft(321))
 
     def test_pending_post_can_be_edited_and_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
