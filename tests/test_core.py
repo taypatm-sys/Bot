@@ -1,3 +1,4 @@
+import asyncio
 import io
 import sqlite3
 import tempfile
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image
 
+from app.analysis_coordinator import AnalysisCoordinator
 from app.config import (
     Config,
     ConfigError,
@@ -30,14 +32,19 @@ from app.formatting import (
 )
 from app.health import build_health_app
 from app.mockup_generator import (
+    MockupAnalysisError,
     NormalizedBox,
     MockupGenerator,
     MockupSpec,
     _DetectedMockup,
+    _DetectedMockupResponse,
+    _ResponseBox,
     build_mockup_spec,
     build_model_photo_prompt,
     choose_photo_directions,
     inspect_print_file,
+    normalize_detected_mockup,
+    prepare_analysis_image,
 )
 from app.reference_catalog import ReferenceCatalog, normalize_reference_urls
 from app.scheduling import parse_local_datetime
@@ -155,6 +162,91 @@ class CopywriterTests(unittest.TestCase):
 
 
 class MockupGeneratorTests(unittest.TestCase):
+    def test_mockup_image_is_normalized_to_supported_jpeg(self) -> None:
+        image = Image.new("RGB", (997, 767), (70, 70, 74))
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=80)
+
+        prepared = prepare_analysis_image(buffer.getvalue())
+
+        self.assertEqual(prepared.mime_type, "image/jpeg")
+        self.assertEqual((prepared.width, prepared.height), (997, 767))
+        self.assertGreater(len(prepared.data), 1000)
+
+    def test_loose_analysis_response_is_normalized_before_validation(self) -> None:
+        raw = _DetectedMockupResponse(
+            side="frontside",
+            garment_type="T shirt",
+            shirt_color="washed charcoal gray",
+            fabric_finish="mineral washed cotton",
+            fit="relaxed",
+            target_gender="neutral",
+            target_age_group="all adults",
+            moods=["cute", "youthful"],
+            print_theme="cartoon cat with lettering",
+            construction_details="crew neck and short sleeves",
+            garment_panel_box=_ResponseBox(x=22, y=8, width=56, height=90),
+            print_box=_ResponseBox(x=40, y=30, width=21, height=24),
+            analysis_confidence=92.4,
+        )
+
+        detected = normalize_detected_mockup(raw)
+
+        self.assertEqual(detected.garment_type, "t-shirt")
+        self.assertEqual(detected.side, "front")
+        self.assertEqual(detected.target_gender, "unisex")
+        self.assertEqual(detected.target_age_group, "adult-universal")
+        self.assertEqual(detected.moods, ["playful", "youth"])
+        self.assertEqual(detected.analysis_confidence, 92)
+
+    def test_structured_parsed_response_works_without_response_text(self) -> None:
+        raw = _DetectedMockupResponse(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="washed dark gray",
+            fabric_finish="washed cotton jersey",
+            fit="relaxed",
+            target_gender="unisex",
+            target_age_group="18-24",
+            moods=["playful", "youth"],
+            print_theme="cartoon cat",
+            construction_details="ribbed crew neck and short sleeves",
+            garment_panel_box=_ResponseBox(x=22, y=8, width=56, height=90),
+            print_box=_ResponseBox(x=40, y=30, width=21, height=24),
+            analysis_confidence=94,
+        )
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return SimpleNamespace(parsed=raw, text="")
+
+        generator = object.__new__(MockupGenerator)
+        generator.client = SimpleNamespace(models=FakeModels())
+        generator.analysis_model = "analysis-model"
+
+        spec = generator._analyze_mockup_sync(
+            b"normalized-jpeg",
+            "image/jpeg",
+            997,
+            767,
+        )
+
+        self.assertEqual(spec.garment_type, "t-shirt")
+        self.assertEqual(spec.print_width_percent, 38)
+        self.assertEqual(spec.print_center_x_percent, 51)
+
+    def test_analysis_rate_limit_message_does_not_blame_image_quality(self) -> None:
+        class FakeRateLimit(Exception):
+            code = 429
+
+        error = MockupGenerator._friendly_analysis_error(
+            FakeRateLimit("RESOURCE_EXHAUSTED")
+        )
+
+        self.assertIsInstance(error, MockupAnalysisError)
+        self.assertIn("лимита анализа", error.user_message)
+        self.assertNotIn("четк", error.user_message.casefold())
+
     def test_algorithm_derives_relative_print_placement_from_boxes(self) -> None:
         detected = _DetectedMockup(
             side="front",
@@ -398,6 +490,41 @@ class MockupGeneratorTests(unittest.TestCase):
         error = FakeInvalidArgument("INVALID_ARGUMENT")
         friendly = MockupGenerator._friendly_error(error)
         self.assertIn("ошибка 400", friendly.user_message)
+
+
+class AnalysisCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interactive_analysis_runs_before_next_background_job(self) -> None:
+        coordinator = AnalysisCoordinator()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        order: list[str] = []
+
+        async def first_background() -> None:
+            async with coordinator.background():
+                order.append("background-1")
+                first_started.set()
+                await release_first.wait()
+
+        async def interactive() -> None:
+            async with coordinator.interactive():
+                order.append("interactive")
+
+        async def second_background() -> None:
+            async with coordinator.background():
+                order.append("background-2")
+
+        first_task = asyncio.create_task(first_background())
+        await first_started.wait()
+        interactive_task = asyncio.create_task(interactive())
+        await asyncio.sleep(0)
+        second_task = asyncio.create_task(second_background())
+        release_first.set()
+        await asyncio.gather(first_task, interactive_task, second_task)
+
+        self.assertEqual(
+            order,
+            ["background-1", "interactive", "background-2"],
+        )
 
 
 class ConfigTests(unittest.TestCase):
@@ -812,6 +939,32 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(draft["model_print_file_id"], "print-file")
             second.clear_model_draft(321)
             self.assertIsNone(second.get_model_draft(321))
+
+    def test_unfinished_model_input_survives_repository_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "posts.sqlite3"
+            first = PostRepository(path)
+            first.initialize()
+            first.save_model_draft(
+                654,
+                {
+                    "model_source_file_id": "garment-before-analysis",
+                    "model_source_mime_type": "image/jpeg",
+                    "model_mockup_spec": None,
+                },
+            )
+            first.close()
+
+            second = PostRepository(path)
+            second.initialize()
+            draft = second.get_model_draft(654)
+
+            self.assertIsNotNone(draft)
+            self.assertEqual(
+                draft["model_source_file_id"],
+                "garment-before-analysis",
+            )
+            self.assertIsNone(draft["model_mockup_spec"])
 
     def test_pending_post_can_be_edited_and_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
