@@ -7,6 +7,82 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 
+_GENERIC_LEADING_WORDS = {
+    "стильная",
+    "стильный",
+    "стильное",
+    "модная",
+    "модный",
+    "модное",
+    "красивая",
+    "красивый",
+    "красивое",
+    "яркая",
+    "яркий",
+    "яркое",
+    "необычная",
+    "необычный",
+    "трендовая",
+    "трендовый",
+    "stylish",
+    "trendy",
+    "beautiful",
+    "cool",
+}
+
+
+def shorten_design_name(value: str, *, max_words: int = 3, max_chars: int = 28) -> str:
+    clean = " ".join(value.strip().strip('"“”«»').split())
+    words = clean.split()
+    while len(words) > 2 and words[0].casefold().strip(".,!?:;") in _GENERIC_LEADING_WORDS:
+        words.pop(0)
+
+    if len(words) > max_words:
+        connector_index = next(
+            (
+                index
+                for index, word in enumerate(words)
+                if word.casefold().strip(".,!?:;") in {"с", "и", "with", "and", "&"}
+                and index > 0
+                and index < len(words) - 1
+            ),
+            None,
+        )
+        if connector_index is not None:
+            next_index = connector_index + 1
+            if (
+                words[connector_index].casefold() == "with"
+                and words[next_index].casefold() in {"a", "an", "the"}
+                and next_index + 1 < len(words)
+            ):
+                next_index += 1
+            words = [
+                words[connector_index - 1],
+                words[connector_index],
+                words[next_index],
+            ]
+        else:
+            words = words[:max_words]
+
+    while len(" ".join(words)) > max_chars and len(words) > 1:
+        words.pop()
+    name = " ".join(words).strip(" .,!?:;-_")
+    if not name:
+        return "Новый принт"
+    if len(name) > max_chars:
+        name = name[:max_chars].rstrip(" .,!?:;-_")
+    return name[0].upper() + name[1:]
+
+
+def shorten_description(value: str, *, max_words: int = 10) -> str:
+    clean = " ".join(value.strip().split())
+    first_sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0]
+    words = first_sentence.split()
+    if len(words) > max_words:
+        first_sentence = " ".join(words[:max_words]).rstrip(" .,!?:;-") + "."
+    return first_sentence[:110].strip()
+
+
 class ProductCopy(BaseModel):
     garment_type: Literal[
         "Футболка",
@@ -14,14 +90,17 @@ class ProductCopy(BaseModel):
         "Свитшот",
         "Лонгслив",
         "Кепка",
+        "Зип-худи",
+        "Куртка",
+        "Шопер",
     ]
     design_name: str = Field(min_length=1, max_length=55)
-    mood_description: str = Field(min_length=1, max_length=140)
+    mood_description: str = Field(min_length=1, max_length=110)
     theme_hashtag: str = Field(min_length=1, max_length=40)
 
     @property
     def title(self) -> str:
-        name = self.design_name.strip().strip('"“”«»').strip()
+        name = shorten_design_name(self.design_name)
         return f'{self.garment_type} "{name}"'
 
     @property
@@ -32,6 +111,9 @@ class ProductCopy(BaseModel):
             "Свитшот": "#свитшот",
             "Лонгслив": "#лонгслив",
             "Кепка": "#кепка",
+            "Зип-худи": "#зипхуди",
+            "Куртка": "#куртка",
+            "Шопер": "#шопер",
         }
         garment_hashtag = garment_hashtags[self.garment_type]
         raw_theme = self.theme_hashtag.strip().lstrip("#").lower()
@@ -43,7 +125,7 @@ class ProductCopy(BaseModel):
 
     @property
     def description(self) -> str:
-        return " ".join(self.mood_description.strip().split())
+        return shorten_description(self.mood_description)
 
 
 LANGUAGE_NAMES = {
@@ -69,15 +151,24 @@ class ImageCopywriter:
     def _create_copy_sync(self, image_bytes: bytes, mime_type: str) -> ProductCopy:
         prompt = (
             "Ты создаешь название товара для Taýpa, магазина DTF печати на одежде. "
-            "Внимательно изучи изображение. Определи тип вещи только из списка: "
-            "Футболка, Худи, Свитшот, Лонгслив, Кепка. Если вещь не видна или есть "
-            "сомнение, выбери Футболка. Затем придумай короткое запоминающееся название "
-            "принта из 2-5 слов по смыслу изображения. Название пиши на "
+            "Внимательно изучи изображение, но анализируй только само изделие и "
+            "напечатанный на нем рисунок. Полностью игнорируй реального человека, "
+            "его лицо, позу, фон, локацию, мебель, машину, цветы, покупки и другие "
+            "предметы, если они не являются частью самого принта. Определи тип вещи "
+            "только из списка: "
+            "Футболка, Худи, Свитшот, Лонгслив, Кепка, Зип-худи, Куртка, Шопер. "
+            "Если вещь не видна или есть сомнение, выбери Футболка. Затем придумай "
+            "очень короткое живое название принта из 1-3 слов, максимум 28 символов. "
+            "Если в принте есть короткая главная надпись до трех слов, предпочти ее. "
+            "Не пересказывай все изображение и не начинай название словами Стильный, "
+            "Стильная, Модный, Модная, Красивый, Красивая или Яркий. Например, вместо "
+            "«Стильная восточная красавица с котом» напиши «Красавица с котом» или "
+            "«Восточная муза». Название пиши на "
             f"{self.language} языке, но можешь естественно смешать русский и английский, "
-            "если это подходит принту. Создай одно короткое живое описание товара, "
-            "которое передает настроение принта. Это должно быть естественное предложение "
-            "без упоминания фотографии или искусственного интеллекта. Можно добавить один "
-            "подходящий эмодзи в конце. Также создай один короткий тематический хэштег "
+            "если это уже есть в принте. Создай одно простое описание из 5-9 слов, "
+            "которое передает настроение, а не перечисляет предметы на изображении. "
+            "Пиши как человек, без рекламных клише, эмодзи, восклицаний и упоминания "
+            "фотографии или искусственного интеллекта. Также создай один тематический хэштег "
             "по содержанию принта, без хэштега с типом вещи. В поле theme_hashtag верни "
             "только одно слово или короткую фразу без пробелов. Не включай тип вещи в "
             "design_name. В design_name не добавляй кавычки, цену, размер, описание или "
@@ -112,13 +203,11 @@ class ImageCopywriter:
         if not response.text:
             raise RuntimeError("Gemini не вернул тип вещи и название")
         result = ProductCopy.model_validate_json(response.text)
-        clean_name = " ".join(result.design_name.strip().split()).strip('"“”«»').strip()
-        if not clean_name:
-            clean_name = "Новый принт"
+        clean_name = shorten_design_name(result.design_name)
         return ProductCopy(
             garment_type=result.garment_type,
-            design_name=clean_name[:55],
-            mood_description=" ".join(result.mood_description.strip().split())[:140],
+            design_name=clean_name,
+            mood_description=shorten_description(result.mood_description),
             theme_hashtag=result.theme_hashtag,
         )
 

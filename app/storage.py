@@ -309,6 +309,31 @@ class PostRepository:
                 (self._active_draft_key(chat_id),),
             )
 
+    def get_recent_mockup_directions(self, *, limit: int = 10) -> list[str]:
+        raw = self.get_setting("mockup_recent_directions:v1")
+        if not raw:
+            return []
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(values, list):
+            return []
+        labels = [str(value) for value in values if str(value).strip()]
+        return labels[-max(1, limit) :]
+
+    def remember_mockup_direction(self, label: str, *, limit: int = 10) -> None:
+        clean_label = label.strip()
+        if not clean_label:
+            return
+        labels = self.get_recent_mockup_directions(limit=limit)
+        labels = [value for value in labels if value != clean_label]
+        labels.append(clean_label)
+        self.set_setting(
+            "mockup_recent_directions:v1",
+            json.dumps(labels[-max(1, limit) :], ensure_ascii=False),
+        )
+
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
         if self.get_setting("presets_seeded") == "1":
             return

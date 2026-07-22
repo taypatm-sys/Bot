@@ -15,7 +15,7 @@ from app.config import (
     normalize_gemini_image_size,
     normalize_gemini_model,
 )
-from app.copywriter import ProductCopy
+from app.copywriter import ProductCopy, shorten_design_name
 from app.formatting import (
     TemplateError,
     contact_link,
@@ -128,6 +128,23 @@ class CopywriterTests(unittest.TestCase):
         self.assertEqual(product.description, "Стиль с характером")
         self.assertEqual(product.hashtags, "#худи #karakum_spirit")
 
+    def test_long_generic_name_is_shortened_naturally(self) -> None:
+        self.assertEqual(
+            shorten_design_name("Стильная восточная красавица с котом"),
+            "Красавица с котом",
+        )
+
+    def test_title_never_exceeds_three_words(self) -> None:
+        product = ProductCopy(
+            garment_type="Футболка",
+            design_name="Очень длинное название красивого восточного принта",
+            mood_description="Спокойный национальный образ для повседневного настроения",
+            theme_hashtag="восток",
+        )
+        name = product.title.split('"', 2)[1]
+        self.assertLessEqual(len(name.split()), 3)
+        self.assertLessEqual(len(name), 28)
+
 
 class MockupGeneratorTests(unittest.TestCase):
     def test_batch_uses_distinct_people_and_scenes(self) -> None:
@@ -151,8 +168,9 @@ class MockupGeneratorTests(unittest.TestCase):
             fit="relaxed",
             print_width_percent=48,
             print_height_percent=27,
-            print_top_from_collar_percent=18,
+            print_top_offset_percent=18,
             target_gender="women",
+            construction_details="ribbed crew neck and dropped shoulders",
         )
         prompt = build_model_photo_prompt(spec, direction, "batch123")
         self.assertIn("front", prompt)
@@ -161,11 +179,45 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertIn("18%", prompt)
         self.assertIn("Do not redraw", prompt)
         self.assertIn("Vertical 4:5", prompt)
-        self.assertIn("central 76%", prompt)
-        self.assertIn("different, fictional, non-celebrity adult", prompt)
-        self.assertIn("DTF-printed", prompt)
-        self.assertIn("less digitally saturated", prompt)
+        self.assertIn("at least 8%", prompt)
+        self.assertIn("Action, not pose", prompt)
+        self.assertIn("Never invent a rectangular backing", prompt)
+        self.assertIn("different fictional non-celebrity adult", prompt)
+        self.assertIn("DTF heat-transfer layer", prompt)
+        self.assertIn("normal 24-35 mm equivalent phone lens", prompt)
         self.assertIn("intended wearer is women", prompt)
+
+    def test_direction_library_contains_sitting_and_moving_scenes(self) -> None:
+        directions = choose_photo_directions(10, random.Random(13))
+        kinds = {item.pose_kind for item in directions}
+        self.assertIn("sitting", kinds)
+        self.assertTrue({"walking", "activity"}.intersection(kinds))
+
+    def test_cap_prompt_preserves_seam_and_dtf_physics(self) -> None:
+        direction = choose_photo_directions(
+            1,
+            random.Random(8),
+            target_gender="women",
+            garment_type="cap",
+        )[0]
+        spec = MockupSpec(
+            side="front",
+            garment_type="cap",
+            shirt_color="washed charcoal",
+            fabric_finish="washed cotton twill",
+            fit="soft unstructured crown",
+            print_width_percent=52,
+            print_height_percent=28,
+            print_top_offset_percent=22,
+            target_gender="women",
+            construction_details="six panels, center seam and stitched curved brim",
+        )
+        prompt = build_model_photo_prompt(spec, direction, "capbatch")
+        self.assertIn("CAP-SPECIFIC DTF PHYSICS", prompt)
+        self.assertIn("center vertical panel seam", prompt)
+        self.assertIn("not embroidery", prompt)
+        self.assertIn("rows of stitching on the brim", prompt)
+        self.assertIn("52%", prompt)
 
     def test_feminine_print_selects_only_women(self) -> None:
         directions = choose_photo_directions(
@@ -330,6 +382,19 @@ class SchedulingTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_recent_mockup_directions_persist_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            repository.remember_mockup_direction("На ступенях", limit=3)
+            repository.remember_mockup_direction("В лифте с кофе", limit=3)
+            repository.remember_mockup_direction("На ступенях", limit=3)
+
+            self.assertEqual(
+                repository.get_recent_mockup_directions(limit=3),
+                ["В лифте с кофе", "На ступенях"],
+            )
+
     def test_old_database_gets_size_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "posts.sqlite3"

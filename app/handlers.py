@@ -507,6 +507,16 @@ def build_router(
         source_bytes = source_buffer.getvalue()
         stored_spec = data.get("model_mockup_spec")
         if stored_spec:
+            stored_spec = dict(stored_spec)
+            if "print_top_offset_percent" not in stored_spec:
+                stored_spec["print_top_offset_percent"] = stored_spec.pop(
+                    "print_top_from_collar_percent",
+                    10,
+                )
+            stored_spec.setdefault(
+                "construction_details",
+                "standard garment construction from the source",
+            )
             spec = MockupSpec.model_validate(
                 {"target_gender": "unisex", **stored_spec}
             )
@@ -523,11 +533,19 @@ def build_router(
             )
 
         batch_id = secrets.token_hex(4)
-        used_labels = list(data.get("model_used_direction_labels", []))
+        used_labels = list(
+            dict.fromkeys(
+                [
+                    *repository.get_recent_mockup_directions(limit=10),
+                    *data.get("model_used_direction_labels", []),
+                ]
+            )
+        )
         target_gender = spec.target_gender if spec else "unisex"
         directions = choose_photo_directions(
             config.mockup_variants,
             target_gender=target_gender,
+            garment_type=spec.garment_type if spec else None,
             exclude_labels=used_labels,
         )
         generated_file_ids: list[str] = []
@@ -571,6 +589,7 @@ def build_router(
             )
             generated_file_ids.append(sent.photo[-1].file_id)
             used_labels.append(direction.label)
+            repository.remember_mockup_direction(direction.label, limit=10)
 
         if not generated_file_ids:
             await state.set_state(DraftStates.waiting_model_mockup)
@@ -586,9 +605,11 @@ def build_router(
             model_used_direction_labels=used_labels,
         )
         await state.set_state(DraftStates.model_photos_ready)
+        result_count = len(generated_file_ids)
+        result_word = "вариант" if result_count == 1 else "варианта"
         result_text = (
-            f"Готово: {len(generated_file_ids)} вариантов. Выберите фотографию "
-            "для поста или запросите новые."
+            f"Готово: {result_count} {result_word}. Выберите фотографию "
+            "для поста или запросите новую."
         )
         if generation_error:
             result_text += f"\n\nСледующий вариант не создан: {generation_error}"
@@ -1047,9 +1068,9 @@ def build_router(
             else f"{config.mockup_variants} разных реалистичных фото"
         )
         await message.answer(
-            "Отправьте готовый макет одежды. Лучше отправить его как файл PNG или "
+            "Отправьте готовый макет одежды или кепки. Лучше отправить его как файл PNG или "
             "JPEG, тогда мелкий текст и детали принта сохранятся точнее.\n\n"
-            f"Бот создаст {generation_count} 4:5."
+            f"Бот создаст {generation_count} 4:5 с физикой DTF."
         )
 
     async def accept_model_mockup(
@@ -1069,7 +1090,7 @@ def build_router(
             model_used_direction_labels=[],
         )
         status_message = await message.answer(
-            "Макет принят. Сначала измеряю принт, затем создаю фотографии. "
+            "Макет принят. Сначала определяю изделие и измеряю принт, затем создаю фотографию. "
             "Это может занять несколько минут."
         )
         await generate_model_batch(
