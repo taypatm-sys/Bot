@@ -33,6 +33,7 @@ from app.formatting import (
 from app.health import build_health_app
 from app.mockup_generator import (
     MockupAnalysisError,
+    MockupGeometryError,
     NormalizedBox,
     MockupGenerator,
     MockupSpec,
@@ -42,6 +43,7 @@ from app.mockup_generator import (
     build_mockup_spec,
     build_model_photo_prompt,
     choose_photo_directions,
+    ensure_mockup_spec_ready,
     inspect_print_file,
     normalize_detected_mockup,
     prepare_analysis_image,
@@ -198,6 +200,108 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertEqual(detected.target_age_group, "adult-universal")
         self.assertEqual(detected.moods, ["playful", "youth"])
         self.assertEqual(detected.analysis_confidence, 92)
+
+    def test_zero_to_one_confidence_is_converted_to_percent(self) -> None:
+        raw = _DetectedMockupResponse(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="charcoal gray",
+            fabric_finish="acid wash",
+            fit="oversized",
+            target_gender="unisex",
+            target_age_group="adult-universal",
+            moods=["playful"],
+            print_theme="cat graphic",
+            construction_details="crew neck and drop shoulder",
+            garment_panel_box=_ResponseBox(x=22, y=7, width=56, height=90),
+            print_box=_ResponseBox(x=41, y=30, width=19, height=24),
+            analysis_confidence=0.96,
+        )
+
+        detected = normalize_detected_mockup(raw)
+
+        self.assertEqual(detected.analysis_confidence, 96)
+
+    def test_mixed_percent_and_pixel_boxes_are_normalized_separately(self) -> None:
+        raw = _DetectedMockupResponse(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="charcoal gray",
+            fabric_finish="acid wash",
+            fit="oversized",
+            target_gender="unisex",
+            target_age_group="adult-universal",
+            moods=["playful"],
+            print_theme="cat wearing a traditional hat",
+            construction_details="crew neck and drop shoulder",
+            garment_panel_box=_ResponseBox(x=22, y=7, width=56, height=90),
+            print_box=_ResponseBox(x=410, y=230, width=190, height=180),
+            analysis_confidence=1.0,
+        )
+
+        detected = normalize_detected_mockup(
+            raw,
+            image_width=997,
+            image_height=767,
+        )
+        spec = build_mockup_spec(
+            detected,
+            image_width=997,
+            image_height=767,
+        )
+
+        self.assertEqual(detected.analysis_confidence, 100)
+        self.assertTrue(30 <= spec.print_width_percent <= 36)
+        self.assertTrue(24 <= spec.print_height_percent <= 28)
+        self.assertTrue(48 <= spec.print_center_x_percent <= 53)
+        self.assertTrue(spec.geometry_validated)
+
+    def test_impossible_geometry_is_rejected_instead_of_clipped(self) -> None:
+        raw = _DetectedMockupResponse(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="gray",
+            fabric_finish="cotton",
+            fit="oversized",
+            target_gender="unisex",
+            target_age_group="adult-universal",
+            moods=["playful"],
+            print_theme="cat graphic",
+            construction_details="crew neck",
+            garment_panel_box=_ResponseBox(x=20, y=5, width=60, height=90),
+            print_box=_ResponseBox(x=95, y=80, width=20, height=30),
+            analysis_confidence=95,
+        )
+
+        with self.assertRaises(MockupGeometryError):
+            normalize_detected_mockup(
+                raw,
+                image_width=997,
+                image_height=767,
+            )
+
+    def test_old_unvalidated_analysis_cannot_start_generation(self) -> None:
+        spec = MockupSpec(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="charcoal gray",
+            fabric_finish="acid wash",
+            fit="oversized",
+            print_width_percent=5,
+            print_height_percent=3,
+            print_top_offset_percent=80,
+            print_left_offset_percent=95,
+            print_center_x_percent=98,
+            target_gender="unisex",
+            target_age_group="adult-universal",
+            moods=["playful"],
+            print_theme="cat graphic",
+            construction_details="crew neck and drop shoulder",
+            analysis_confidence=1,
+        )
+
+        with self.assertRaises(MockupGeometryError):
+            ensure_mockup_spec_ready(spec)
 
     def test_structured_parsed_response_works_without_response_text(self) -> None:
         raw = _DetectedMockupResponse(
@@ -490,6 +594,58 @@ class MockupGeneratorTests(unittest.TestCase):
         error = FakeInvalidArgument("INVALID_ARGUMENT")
         friendly = MockupGenerator._friendly_error(error)
         self.assertIn("ошибка 400", friendly.user_message)
+
+
+class MockupAnalysisRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_geometry_is_remeasured_automatically(self) -> None:
+        invalid = _DetectedMockupResponse(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="charcoal gray",
+            fabric_finish="acid wash",
+            fit="oversized",
+            target_gender="unisex",
+            target_age_group="adult-universal",
+            moods=["playful"],
+            print_theme="cat graphic",
+            construction_details="crew neck and drop shoulder",
+            garment_panel_box=_ResponseBox(x=20, y=5, width=60, height=90),
+            print_box=_ResponseBox(x=95, y=80, width=20, height=30),
+            analysis_confidence=1.0,
+        )
+        valid = invalid.model_copy(
+            update={
+                "print_box": _ResponseBox(x=40, y=28, width=20, height=24),
+                "analysis_confidence": 0.96,
+            }
+        )
+
+        class FakeModels:
+            def __init__(self):
+                self.calls = 0
+                self.prompts: list[str] = []
+
+            def generate_content(self, **kwargs):
+                self.prompts.append(kwargs["contents"][0])
+                response = invalid if self.calls == 0 else valid
+                self.calls += 1
+                return SimpleNamespace(parsed=response, text="")
+
+        image = Image.new("RGB", (997, 767), (70, 70, 74))
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        models = FakeModels()
+        generator = object.__new__(MockupGenerator)
+        generator.client = SimpleNamespace(models=models)
+        generator.analysis_model = "analysis-model"
+        generator.analysis_coordinator = None
+
+        spec = await generator.analyze_mockup(buffer.getvalue(), "image/jpeg")
+
+        self.assertEqual(models.calls, 2)
+        self.assertTrue(spec.geometry_validated)
+        self.assertEqual(spec.analysis_confidence, 96)
+        self.assertIn("previous measurement", models.prompts[1].casefold())
 
 
 class AnalysisCoordinatorTests(unittest.IsolatedAsyncioTestCase):
