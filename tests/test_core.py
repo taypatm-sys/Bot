@@ -138,7 +138,11 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertEqual(len({item.seed for item in directions}), 4)
 
     def test_prompt_locks_print_scale_and_safe_area(self) -> None:
-        direction = choose_photo_directions(1, random.Random(7))[0]
+        direction = choose_photo_directions(
+            1,
+            random.Random(7),
+            target_gender="women",
+        )[0]
         spec = MockupSpec(
             side="front",
             garment_type="t-shirt",
@@ -148,6 +152,7 @@ class MockupGeneratorTests(unittest.TestCase):
             print_width_percent=48,
             print_height_percent=27,
             print_top_from_collar_percent=18,
+            target_gender="women",
         )
         prompt = build_model_photo_prompt(spec, direction, "batch123")
         self.assertIn("front", prompt)
@@ -156,8 +161,33 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertIn("18%", prompt)
         self.assertIn("Do not redraw", prompt)
         self.assertIn("Vertical 4:5", prompt)
-        self.assertIn("central 80%", prompt)
+        self.assertIn("central 76%", prompt)
         self.assertIn("different, fictional, non-celebrity adult", prompt)
+        self.assertIn("DTF-printed", prompt)
+        self.assertIn("less digitally saturated", prompt)
+        self.assertIn("intended wearer is women", prompt)
+
+    def test_feminine_print_selects_only_women(self) -> None:
+        directions = choose_photo_directions(
+            4,
+            random.Random(21),
+            target_gender="women",
+        )
+        self.assertTrue(all(item.gender == "women" for item in directions))
+
+    def test_used_photo_direction_is_avoided(self) -> None:
+        first = choose_photo_directions(
+            1,
+            random.Random(4),
+            target_gender="women",
+        )[0]
+        second = choose_photo_directions(
+            1,
+            random.Random(4),
+            target_gender="women",
+            exclude_labels=[first.label],
+        )[0]
+        self.assertNotEqual(first.label, second.label)
 
     def test_billing_error_is_explained(self) -> None:
         error = MockupGenerator._friendly_error(
@@ -423,6 +453,29 @@ class StorageTests(unittest.TestCase):
             )
             self.assertEqual(restored_id, preset_id)
             self.assertEqual(repository.get_preset(preset_id).price, "510 манат")
+
+    def test_active_draft_survives_repository_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "posts.sqlite3"
+            first = PostRepository(path)
+            first.initialize()
+            first.save_active_draft(
+                123,
+                {
+                    "photo_file_id": "telegram-file",
+                    "title": "Футболка Тест",
+                    "description": "Описание",
+                },
+            )
+            first.close()
+
+            second = PostRepository(path)
+            second.initialize()
+            draft = second.get_active_draft(123)
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft["photo_file_id"], "telegram-file")
+            second.clear_active_draft(123)
+            self.assertIsNone(second.get_active_draft(123))
 
     def test_pending_post_can_be_edited_and_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -411,6 +411,26 @@ def build_router(
 ) -> Router:
     router = Router()
 
+    required_draft_fields = {"photo_file_id", "title", "description"}
+
+    async def restore_active_draft(
+        state: FSMContext,
+        chat_id: int,
+    ) -> dict:
+        data = await state.get_data()
+        if required_draft_fields.issubset(data):
+            return data
+        saved = repository.get_active_draft(chat_id)
+        if saved and required_draft_fields.issubset(saved):
+            await state.update_data(**saved)
+            return await state.get_data()
+        return data
+
+    async def save_active_draft(state: FSMContext, chat_id: int) -> None:
+        data = await state.get_data()
+        if required_draft_fields.issubset(data):
+            repository.save_active_draft(chat_id, data)
+
     async def prepare_post_draft(
         *,
         message: Message,
@@ -431,7 +451,7 @@ def build_router(
             return False
 
         await state.clear()
-        await state.update_data(
+        draft_data = dict(
             photo_file_id=photo_file_id,
             title=generated.title,
             description=generated.description,
@@ -439,6 +459,8 @@ def build_router(
             design_name=generated.design_name,
             theme_hashtag=generated.theme_hashtag,
         )
+        await state.update_data(**draft_data)
+        repository.save_active_draft(message.chat.id, draft_data)
         presets = repository.list_presets()
         if presets:
             await waiting.edit_text(
@@ -485,10 +507,12 @@ def build_router(
         source_bytes = source_buffer.getvalue()
         stored_spec = data.get("model_mockup_spec")
         if stored_spec:
-            spec = MockupSpec.model_validate(stored_spec)
+            spec = MockupSpec.model_validate(
+                {"target_gender": "unisex", **stored_spec}
+            )
         else:
             await status_message.edit_text(
-                "Определяю сторону, цвет, размер и положение принта..."
+                "Определяю пол модели, сторону, цвет, размер и положение принта..."
             )
             spec = await mockup_generator.analyze_mockup(
                 source_bytes,
@@ -499,14 +523,23 @@ def build_router(
             )
 
         batch_id = secrets.token_hex(4)
-        directions = choose_photo_directions(config.mockup_variants)
+        used_labels = list(data.get("model_used_direction_labels", []))
+        target_gender = spec.target_gender if spec else "unisex"
+        directions = choose_photo_directions(
+            config.mockup_variants,
+            target_gender=target_gender,
+            exclude_labels=used_labels,
+        )
         generated_file_ids: list[str] = []
         generation_error: str | None = None
 
         for index, direction in enumerate(directions, start=1):
+            wearer_label = (
+                "женская модель" if direction.gender == "women" else "мужская модель"
+            )
             await status_message.edit_text(
                 f"Создаю вариант {index} из {len(directions)}. "
-                "Лицо, поза и место будут новыми..."
+                f"Выбрана {wearer_label}. Лицо, поза и место будут новыми..."
             )
             try:
                 generated_photo = await mockup_generator.generate_variant(
@@ -530,11 +563,14 @@ def build_router(
                 ),
                 caption=(
                     f"Вариант {index} из {len(directions)}\n"
-                    f"{direction.label}\nФормат 4:5"
+                    f"{direction.label}\n"
+                    f"{wearer_label.capitalize()}\n"
+                    "Формат 4:5"
                 ),
                 reply_markup=model_photo_keyboard(batch_id, index - 1),
             )
             generated_file_ids.append(sent.photo[-1].file_id)
+            used_labels.append(direction.label)
 
         if not generated_file_ids:
             await state.set_state(DraftStates.waiting_model_mockup)
@@ -547,6 +583,7 @@ def build_router(
         await state.update_data(
             model_batch_id=batch_id,
             model_generated_file_ids=generated_file_ids,
+            model_used_direction_labels=used_labels,
         )
         await state.set_state(DraftStates.model_photos_ready)
         result_text = (
@@ -568,6 +605,7 @@ def build_router(
         if not await is_admin_message(message, config):
             return
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         storage_note = (
             "Постоянная база подключена."
             if repository.is_persistent
@@ -585,6 +623,7 @@ def build_router(
         if not await is_admin_message(message, config):
             return
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         await message.answer("Текущее действие отменено.", reply_markup=main_keyboard())
 
     @router.message(Command("check"))
@@ -1000,6 +1039,7 @@ def build_router(
         if not await is_admin_message(message, config):
             return
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
         generation_count = (
             "одно реалистичное фото"
@@ -1021,10 +1061,12 @@ def build_router(
         mime_type: str,
     ) -> None:
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         await state.update_data(
             model_source_file_id=file_id,
             model_source_mime_type=mime_type,
             model_mockup_spec=None,
+            model_used_direction_labels=[],
         )
         status_message = await message.answer(
             "Макет принят. Сначала измеряю принт, затем создаю фотографии. "
@@ -1177,6 +1219,7 @@ def build_router(
         if not await is_admin_message(message, config):
             return
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         await message.answer("Отправьте фотографию будущего поста.")
 
     @router.message(F.photo)
@@ -1184,6 +1227,7 @@ def build_router(
         if not await is_admin_message(message, config):
             return
         await state.clear()
+        repository.clear_active_draft(message.chat.id)
         waiting = await message.answer("Анализирую изображение и пишу текст...")
         photo = message.photo[-1]
         buffer = io.BytesIO()
@@ -1208,8 +1252,9 @@ def build_router(
     async def use_preset(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
-        if not {"photo_file_id", "title", "description"}.issubset(data):
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         preset_id = int(callback.data.rsplit(":", 1)[1])
@@ -1218,6 +1263,7 @@ def build_router(
             await callback.answer("Пресет удален", show_alert=True)
             return
         await state.update_data(size=preset.size, price=preset.price)
+        await save_active_draft(state, chat_id)
         await callback.answer(f"Выбран: {preset.name}")
         if callback.message:
             await ask_for_time(callback.message, config)
@@ -1228,8 +1274,9 @@ def build_router(
     ) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
-        if not {"photo_file_id", "title", "description"}.issubset(data):
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
             await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await state.set_state(DraftStates.waiting_size)
@@ -1243,8 +1290,9 @@ def build_router(
     async def choose_size(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
-        required = {"photo_file_id", "title", "description"}
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        required = required_draft_fields
         if not required.issubset(data):
             await callback.answer(
                 "Этот черновик уже закрыт. Отправьте фотографию заново.",
@@ -1263,6 +1311,7 @@ def build_router(
             return
 
         await state.update_data(size=normalize_size(value))
+        await save_active_draft(state, chat_id)
         await callback.answer(f"Размеры: {value}")
         if not callback.message:
             return
@@ -1283,6 +1332,7 @@ def build_router(
             return
         data = await state.get_data()
         await state.update_data(size=size)
+        await save_active_draft(state, message.chat.id)
         if "scheduled_at_utc" in data:
             await send_preview(message, state, config, template_store)
             return
@@ -1299,13 +1349,15 @@ def build_router(
             await message.answer(str(error))
             return
         await state.update_data(price=price)
+        await save_active_draft(state, message.chat.id)
         await ask_for_time(message, config)
 
     @router.callback_query(F.data.startswith("time:"))
     async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
         required = {"photo_file_id", "title", "description", "size", "price"}
         if not required.issubset(data):
             await callback.answer(
@@ -1326,6 +1378,7 @@ def build_router(
             datetime.now(UTC) if value == "now" else from_utc_timestamp(int(value))
         )
         await state.update_data(scheduled_at_utc=scheduled_at.isoformat())
+        await save_active_draft(state, chat_id)
         await callback.answer()
         if callback.message:
             await send_preview(callback.message, state, config, template_store)
@@ -1340,11 +1393,17 @@ def build_router(
             await message.answer(str(error))
             return
         await state.update_data(scheduled_at_utc=scheduled_at.isoformat())
+        await save_active_draft(state, message.chat.id)
         await send_preview(message, state, config, template_store)
 
     @router.callback_query(F.data == "draft:text")
     async def edit_text(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
+            return
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
+            await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await state.set_state(DraftStates.waiting_text_edit)
         await callback.answer()
@@ -1368,11 +1427,17 @@ def build_router(
             garment_type=garment_type,
             design_name=design_name,
         )
+        await save_active_draft(state, message.chat.id)
         await send_preview(message, state, config, template_store)
 
     @router.callback_query(F.data == "draft:description")
     async def edit_description(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
+            return
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
+            await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await state.set_state(DraftStates.waiting_description_edit)
         await callback.answer()
@@ -1388,11 +1453,17 @@ def build_router(
             await message.answer("Описание должно содержать от 1 до 200 символов.")
             return
         await state.update_data(description=description)
+        await save_active_draft(state, message.chat.id)
         await send_preview(message, state, config, template_store)
 
     @router.callback_query(F.data == "draft:size")
     async def edit_size(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
+            return
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
+            await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await state.set_state(DraftStates.waiting_size)
         await callback.answer()
@@ -1404,6 +1475,11 @@ def build_router(
     @router.callback_query(F.data == "draft:price")
     async def edit_price(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
+            return
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
+            await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await state.set_state(DraftStates.waiting_price_edit)
         await callback.answer()
@@ -1420,11 +1496,17 @@ def build_router(
             await message.answer(str(error))
             return
         await state.update_data(price=price)
+        await save_active_draft(state, message.chat.id)
         await send_preview(message, state, config, template_store)
 
     @router.callback_query(F.data == "draft:time")
-    async def edit_time(callback: CallbackQuery) -> None:
+    async def edit_time(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
+            return
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
+        if not required_draft_fields.issubset(data):
+            await callback.answer("Черновик уже закрыт", show_alert=True)
             return
         await callback.answer()
         if callback.message:
@@ -1435,6 +1517,8 @@ def build_router(
         if not await is_admin_callback(callback, config):
             return
         await state.clear()
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        repository.clear_active_draft(chat_id)
         await callback.answer("Черновик удален")
         if callback.message:
             await callback.message.answer("Создание поста отменено.")
@@ -1443,7 +1527,8 @@ def build_router(
     async def confirm_draft(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
             return
-        data = await state.get_data()
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        data = await restore_active_draft(state, chat_id)
         required = {
             "photo_file_id",
             "title",
@@ -1455,6 +1540,7 @@ def build_router(
         if not required.issubset(data):
             await callback.answer("Черновик устарел. Начните заново.", show_alert=True)
             await state.clear()
+            repository.clear_active_draft(chat_id)
             return
 
         scheduled_at = datetime.fromisoformat(data["scheduled_at_utc"])
@@ -1471,6 +1557,7 @@ def build_router(
             theme_hashtag=data.get("theme_hashtag", ""),
         )
         await state.clear()
+        repository.clear_active_draft(chat_id)
         await callback.answer("Готово")
         if callback.message:
             await callback.message.edit_reply_markup(reply_markup=None)

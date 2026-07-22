@@ -23,11 +23,13 @@ class MockupSpec(BaseModel):
     print_width_percent: int = Field(ge=5, le=100)
     print_height_percent: int = Field(ge=3, le=100)
     print_top_from_collar_percent: int = Field(ge=0, le=80)
+    target_gender: Literal["women", "men", "unisex"]
 
 
 @dataclass(frozen=True)
 class PhotoDirection:
     label: str
+    gender: Literal["women", "men"]
     person: str
     setting: str
     pose: str
@@ -53,84 +55,94 @@ class MockupGenerationError(RuntimeError):
 
 _PHOTO_DIRECTIONS = (
     (
-        "Городской дневной свет",
+        "Прогулка по городу",
+        "men",
         "a fictional Central Asian man in his mid twenties, short dark hair, "
-        "clean-shaven, a distinctive natural face",
-        "a quiet contemporary city street in soft daylight",
-        "standing naturally with relaxed shoulders and both hands visible",
-        "eye-level 50 mm editorial fashion photograph",
+        "clean-shaven, with an ordinary distinctive face and natural skin",
+        "a real neighborhood sidewalk in soft late-afternoon daylight",
+        "caught during a relaxed walk, shoulders natural and both hands visible",
+        "a candid handheld smartphone photo taken by a friend",
     ),
     (
-        "Теплый интерьер",
+        "У окна дома",
+        "women",
         "a fictional Central Asian woman in her late twenties, shoulder-length "
-        "dark hair, a distinctive natural face",
-        "a warm minimal interior with wood and indirect window light",
-        "a casual three-quarter stance, arms clear of the printed area",
-        "eye-level 50 mm lifestyle photograph with realistic skin texture",
+        "dark hair, with an ordinary distinctive face and natural skin",
+        "a lived-in apartment near a window with simple furniture in the background",
+        "a relaxed unposed stance, arms naturally clear of the printed area",
+        "a casual handheld phone photo in available window light",
     ),
     (
-        "Золотой час",
+        "Вечерняя прогулка",
+        "men",
         "a fictional man in his early thirties, wavy dark hair, short neat beard, "
-        "a distinctive natural face",
-        "an open urban promenade during golden hour",
-        "walking slowly and looking slightly away from the camera",
-        "natural 35 mm street-style fashion photograph",
+        "with an ordinary distinctive face and natural skin",
+        "a familiar city promenade near sunset with a few softly blurred passersby",
+        "walking naturally and glancing slightly away from the camera",
+        "an unstaged smartphone snapshot taken by a companion",
     ),
     (
-        "Современный лифт",
+        "У кофейни",
+        "women",
         "a fictional woman in her mid twenties, dark bob haircut, a distinctive "
-        "natural face",
-        "a clean modern metal elevator with cinematic practical lighting",
-        "turning naturally toward the camera without covering the shirt",
-        "realistic 35 mm editorial photograph with controlled highlights",
+        "ordinary face and natural skin",
+        "outside a real neighborhood cafe with everyday street details",
+        "turning naturally after being called, without covering the shirt",
+        "a spontaneous handheld phone photo with slightly imperfect framing",
     ),
     (
-        "Архитектура",
+        "Во дворе",
+        "men",
         "a fictional man in his late twenties, dark curly hair, a distinctive "
-        "natural face",
-        "minimal concrete architecture under a clear blue sky",
-        "a relaxed low-energy pose with the full shirt unobstructed",
-        "slightly low-angle 50 mm fashion photograph without lens distortion",
+        "ordinary face and natural skin",
+        "an everyday residential courtyard under open daylight",
+        "standing casually as if talking to the photographer, shirt unobstructed",
+        "an eye-level handheld smartphone photo, not a fashion shoot",
     ),
     (
-        "Светлая студия",
+        "Светлая комната",
+        "women",
         "a fictional Central Asian woman in her early thirties, dark hair tied "
-        "back, a distinctive natural face",
-        "a bright neutral daylight studio with a soft textured wall",
+        "back, with an ordinary distinctive face and natural skin",
+        "a normal bright room with a plain textured wall and daylight",
         "standing comfortably with one hand near a pocket and the other visible",
-        "clean 70 mm commercial apparel photograph",
+        "a simple handheld phone photo taken by another person",
     ),
     (
-        "Кофейня",
+        "У магазина",
+        "men",
         "a fictional man in his mid thirties, close-cropped dark hair, light "
-        "stubble, a distinctive natural face",
-        "outside a modern cafe with softly blurred city details",
+        "stubble, with an ordinary distinctive face and natural skin",
+        "outside a local shop with softly blurred everyday city details",
         "leaning lightly against a wall while keeping the print fully visible",
-        "candid 50 mm lifestyle photograph with shallow depth of field",
+        "a believable phone-camera portrait taken by a friend",
     ),
     (
-        "Зеленый интерьер",
+        "На балконе",
+        "women",
         "a fictional woman in her late twenties, long loose dark curls, a "
-        "distinctive natural face",
-        "a modern sunlit interior with large natural green plants",
+        "distinctive ordinary face and natural skin",
+        "a real apartment balcony with a few plants and soft daylight",
         "a calm over-the-shoulder pose appropriate to the printed side",
-        "natural 50 mm editorial photograph with soft window light",
+        "a candid handheld smartphone photo with natural exposure",
     ),
     (
-        "Пустынный пейзаж",
+        "За городом",
+        "men",
         "a fictional Central Asian man in his late twenties, medium-length dark "
-        "hair, a distinctive natural face",
-        "a quiet road near dry foothills under a dramatic but realistic sky",
+        "hair, with an ordinary distinctive face and natural skin",
+        "a quiet roadside near dry foothills under an ordinary realistic sky",
         "standing at ease and turning only enough to show the correct shirt side",
-        "documentary-style 50 mm fashion photograph",
+        "a slightly imperfect handheld phone photo taken during a trip",
     ),
     (
-        "Галерея",
+        "На улице после дождя",
+        "women",
         "a fictional Central Asian woman in her mid thirties, straight dark hair, "
-        "a distinctive natural face",
-        "a spacious contemporary art gallery with neutral walls",
-        "a composed editorial pose with arms away from the torso",
-        "high-end 70 mm apparel campaign photograph",
+        "with an ordinary distinctive face and natural skin",
+        "a normal city street after light rain with muted reflections",
+        "a natural pause while walking, with arms away from the torso",
+        "a spontaneous smartphone photo with realistic mixed light",
     ),
 )
 
@@ -138,21 +150,33 @@ _PHOTO_DIRECTIONS = (
 def choose_photo_directions(
     count: int,
     rng: Optional[random.Random] = None,
+    *,
+    target_gender: Literal["women", "men", "unisex"] = "unisex",
+    exclude_labels: Optional[list[str]] = None,
 ) -> list[PhotoDirection]:
     if count < 1:
         raise ValueError("Количество вариантов должно быть больше нуля")
     picker = rng or secrets.SystemRandom()
-    if count <= len(_PHOTO_DIRECTIONS):
-        selected = picker.sample(_PHOTO_DIRECTIONS, count)
+    pool = [
+        item
+        for item in _PHOTO_DIRECTIONS
+        if target_gender == "unisex" or item[1] == target_gender
+    ]
+    unused = [item for item in pool if item[0] not in set(exclude_labels or [])]
+    if len(unused) >= count:
+        selected = picker.sample(unused, count)
+    elif count <= len(pool):
+        selected = picker.sample(pool, count)
     else:
-        selected = [picker.choice(_PHOTO_DIRECTIONS) for _ in range(count)]
+        selected = [picker.choice(pool) for _ in range(count)]
     return [
         PhotoDirection(
             label=item[0],
-            person=item[1],
-            setting=item[2],
-            pose=item[3],
-            camera=item[4],
+            gender=item[1],
+            person=item[2],
+            setting=item[3],
+            pose=item[4],
+            camera=item[5],
             seed=picker.randrange(1, 2_147_483_647),
         )
         for item in selected
@@ -178,12 +202,15 @@ def build_model_photo_prompt(
             f"{spec.print_width_percent}% of the wearable torso panel width. "
             f"The print height is about {spec.print_height_percent}% of the shirt "
             f"height from collar to hem. Its top begins about "
-            f"{spec.print_top_from_collar_percent}% of that height below the collar."
+            f"{spec.print_top_from_collar_percent}% of that height below the collar. "
+            f"The intended wearer is {spec.target_gender}."
         )
 
     return (
-        "Create one photorealistic commercial lifestyle photograph for a real "
-        "clothing shop. The supplied image is the only product reference. It is "
+        "Create one highly believable everyday photograph for a real clothing "
+        "shop's social page. It must feel like an ordinary person quickly took it "
+        "on a modern smartphone, not like a studio campaign or an AI render. The "
+        "supplied image is the only product reference. It is "
         "a flat garment mockup, not a composition to copy. Ignore the surrounding "
         "background, presentation graphics, shadows, watermarks and any writing "
         "outside the physical garment.\n\n"
@@ -191,9 +218,9 @@ def build_model_photo_prompt(
         "1. Treat the complete artwork already printed inside the garment as locked "
         "source artwork. Transfer it exactly as one unchanged visual texture.\n"
         "2. Preserve every visible letter, number, face inside the artwork, line, "
-        "ornament, color, spacing, boundary and aspect ratio. Do not redraw, rewrite, "
-        "translate, correct, simplify, crop, extend, recolor, duplicate or invent any "
-        "part of the print. Add no new text or logos.\n"
+        "ornament, underlying color relationship, spacing, boundary and aspect ratio. "
+        "Do not redraw, rewrite, translate, correct, simplify, crop, extend, duplicate "
+        "or invent any part of the print. Add no new text or logos.\n"
         "3. People or faces that are part of the printed artwork must remain only "
         "inside that artwork. The real wearer must be a completely different, "
         "fictional, non-celebrity adult.\n"
@@ -204,7 +231,8 @@ def build_model_photo_prompt(
         "6. Preserve the exact relative print scale and placement from the source. "
         "Do not enlarge the design to fill the shirt. The design may follow natural "
         "fabric folds and perspective, but it must remain complete, unobstructed and "
-        "easy to inspect.\n"
+        "easy to inspect. Measure against the wearable torso panel, not the full "
+        "image canvas.\n"
         f"7. {measurements}\n\n"
         "NEW PHOTO DIRECTION:\n"
         f"- Wearer: {direction.person}.\n"
@@ -213,9 +241,23 @@ def build_model_photo_prompt(
         f"- Camera: {direction.camera}.\n"
         "- Style the wearer simply with neutral trousers or jeans. No jacket, bag, "
         "hair, arm, jewelry or accessory may cover the print.\n"
-        "- Use believable anatomy, natural hands, realistic pores, individual hair "
-        "strands, true fabric weight, seams, wrinkles, print integration, lighting "
-        "and shadows. Avoid beauty-filter skin and the synthetic AI look.\n\n"
+        "- Use believable anatomy, natural hands, real pores, small skin variations, "
+        "flyaway hairs, true fabric weight and ordinary clothes styling. Avoid beauty "
+        "filters, perfect symmetry, model-like posing and the synthetic AI look.\n"
+        "- The person gender must match the intended audience found in the artwork. "
+        "A design dominated by a woman or feminine styling belongs on a woman unless "
+        "the source clearly signals unisex or menswear.\n\n"
+        "REAL PRINT ON REAL FABRIC:\n"
+        "- The artwork is physically DTF-printed onto the shirt, never pasted on top "
+        "as a bright digital rectangle. It bends continuously over body curvature and "
+        "fabric folds, with tiny local changes in sharpness, light and shadow.\n"
+        "- Keep the artwork's identity and palette, but render its observed brightness "
+        "and saturation naturally under the scene light. It should be subtly less "
+        "bright and less digitally saturated than the flat mockup, with no neon glow, "
+        "no luminous whites, no uniformly bright pixels and no sticker-like border.\n"
+        "- Let fabric weave and mild washed-shirt texture remain faintly visible in "
+        "the print surface. Highlights, shadows and color temperature must affect the "
+        "shirt and print together as one photographed object.\n\n"
         "COMPOSITION AND SAFE AREA:\n"
         "- Vertical 4:5 image for a Telegram and social-media product post.\n"
         "- Frame approximately from the top of the head to mid-thigh so the shirt "
@@ -223,10 +265,12 @@ def build_model_photo_prompt(
         "- For a front print, show the wearer's natural face clearly. For a back "
         "print, show the back squarely and use only a natural partial side profile "
         "without twisting or hiding the shirt.\n"
+        "- For a back print on a woman, keep long hair tied up or moved fully in "
+        "front of the shoulders so no part of the artwork is covered.\n"
         "- Keep the complete head, both shoulders, both sleeves, the entire printed "
         "area and the shirt hem inside the frame.\n"
-        "- Keep the face and the full garment within the central 80% of the image, "
-        "with at least 8% breathing room on every edge so interface previews on "
+        "- Keep the face and the full garment within the central 76% of the image, "
+        "with at least 10% breathing room on every edge so interface previews on "
         "different devices do not cut important content.\n"
         "- The shirt and its print are the clear focus. No collage, split screen, "
         "mockup board, border, caption, watermark or extra graphic.\n"
@@ -280,7 +324,11 @@ class MockupGenerator:
             "bounding box: width as a percentage of the wearable torso panel between "
             "side seams, height as a percentage of shirt height from collar to hem, "
             "and the top distance from the collar as a percentage of that shirt "
-            "height. Measure the full printed artwork including all of its text."
+            "height. Measure the full printed artwork including all of its text. "
+            "Also infer the intended wearer from the artwork itself: use women when "
+            "a female figure or clearly feminine styling dominates, men when a male "
+            "figure or clearly masculine styling dominates, and unisex only for a "
+            "genuinely neutral design. Do not infer gender from the blank mockup cut."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,

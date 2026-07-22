@@ -1,6 +1,7 @@
+import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence, Union
 
@@ -260,6 +261,52 @@ class PostRepository:
                 ON CONFLICT(key) DO NOTHING
                 """,
                 (key, value, now),
+            )
+
+    @staticmethod
+    def _active_draft_key(chat_id: int) -> str:
+        return f"active_draft:{chat_id}"
+
+    def save_active_draft(
+        self,
+        chat_id: int,
+        data: Mapping[str, Any],
+        *,
+        lifetime: timedelta = timedelta(hours=48),
+    ) -> None:
+        payload = {
+            "expires_at_utc": _iso(datetime.now(UTC) + lifetime),
+            "data": dict(data),
+        }
+        self.set_setting(
+            self._active_draft_key(chat_id),
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    def get_active_draft(self, chat_id: int) -> Optional[dict[str, Any]]:
+        raw = self.get_setting(self._active_draft_key(chat_id))
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            expires_at = _from_iso(payload["expires_at_utc"])
+            data = payload["data"]
+            if not isinstance(data, dict):
+                raise ValueError("draft data must be an object")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.clear_active_draft(chat_id)
+            return None
+        if expires_at <= datetime.now(UTC):
+            self.clear_active_draft(chat_id)
+            return None
+        return data
+
+    def clear_active_draft(self, chat_id: int) -> None:
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "DELETE FROM app_settings WHERE key = ?",
+                (self._active_draft_key(chat_id),),
             )
 
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
