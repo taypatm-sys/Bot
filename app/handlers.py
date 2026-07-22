@@ -35,6 +35,7 @@ from app.mockup_generator import (
     choose_photo_directions,
 )
 from app.publisher import Publisher
+from app.reference_catalog import ReferenceCatalog
 from app.scheduling import (
     format_local,
     from_utc_timestamp,
@@ -54,6 +55,7 @@ class DraftStates(StatesGroup):
     waiting_model_mockup = State()
     generating_model_photos = State()
     model_photos_ready = State()
+    waiting_reference_list = State()
     waiting_size = State()
     waiting_custom_size = State()
     waiting_price = State()
@@ -82,7 +84,10 @@ def main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="Запланированные"),
                 KeyboardButton(text="Пресеты"),
             ],
-            [KeyboardButton(text="Шаблон")],
+            [
+                KeyboardButton(text="Шаблон"),
+                KeyboardButton(text="Референсы"),
+            ],
         ],
         resize_keyboard=True,
     )
@@ -116,6 +121,29 @@ def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
                     text="Закончить",
                     callback_data=f"model:done:{batch_id}",
                 )
+            ],
+        ]
+    )
+
+
+def references_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Добавить список ссылок",
+                    callback_data="references:add",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Повторить ошибки",
+                    callback_data="references:retry",
+                ),
+                InlineKeyboardButton(
+                    text="Обновить статус",
+                    callback_data="references:refresh",
+                ),
             ],
         ]
     )
@@ -406,6 +434,7 @@ def build_router(
     repository: PostRepository,
     copywriter: ImageCopywriter,
     mockup_generator: MockupGenerator,
+    reference_catalog: ReferenceCatalog,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
 ) -> Router:
@@ -663,7 +692,9 @@ def build_router(
                 f"Статус бота в канале: {member.status}\n"
                 f"База: {repository.backend_name}\n"
                 f"Фото на модели: {config.gemini_image_model}, "
-                f"{config.gemini_image_size}, 4:5"
+                f"{config.gemini_image_size}, 4:5\n"
+                f"Референсов готово: "
+                f"{repository.reference_stats().get('ready', 0)}"
             )
         except Exception as error:
             logger.exception("Проверка настроек не пройдена")
@@ -672,6 +703,121 @@ def build_router(
                 "и подключение базы.\n\n"
                 f"Ошибка: {error}"
             )
+
+    @router.message(Command("references"))
+    @router.message(F.text == "Референсы")
+    async def references_status(message: Message, state: FSMContext) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await state.clear()
+        await message.answer(
+            reference_catalog.status_text(),
+            reply_markup=references_keyboard(),
+        )
+
+    @router.callback_query(F.data == "references:refresh")
+    async def refresh_references(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        await callback.answer("Статус обновлен")
+        if callback.message:
+            await callback.message.edit_text(
+                reference_catalog.status_text(),
+                reply_markup=references_keyboard(),
+            )
+
+    @router.callback_query(F.data == "references:retry")
+    async def retry_references(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        count = reference_catalog.retry_failed()
+        await callback.answer(f"Повторно поставлено: {count}")
+        if callback.message:
+            await callback.message.edit_text(
+                reference_catalog.status_text(),
+                reply_markup=references_keyboard(),
+            )
+
+    @router.callback_query(F.data == "references:add")
+    async def add_references(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        await state.set_state(DraftStates.waiting_reference_list)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Отправьте TXT-файл со ссылками Pinterest или вставьте ссылки "
+                "одним сообщением. Дубликаты повторно не добавятся."
+            )
+
+    async def accept_reference_text(
+        message: Message,
+        state: FSMContext,
+        *,
+        text: str,
+        source_name: str,
+    ) -> None:
+        added, total = reference_catalog.add_text(text, source_name=source_name)
+        if total == 0:
+            await message.answer(
+                "В файле не найдены ссылки Pinterest. Нужны ссылки вида "
+                "pinterest.com/pin/... или pin.it/..."
+            )
+            return
+        await state.clear()
+        duplicates = total - added
+        await message.answer(
+            f"Принято ссылок: {total}\n"
+            f"Новых: {added}\n"
+            f"Уже были в базе: {duplicates}\n\n"
+            "Новые фотографии будут загружены и размечены по очереди в фоне.",
+            reply_markup=main_keyboard(),
+        )
+
+    @router.message(DraftStates.waiting_reference_list, F.document)
+    async def receive_reference_file(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_message(message, config):
+            return
+        document = message.document
+        filename = document.file_name or "references.txt"
+        if not filename.casefold().endswith(".txt"):
+            await message.answer("Нужен обычный TXT-файл со ссылками.")
+            return
+        if document.file_size and document.file_size > 1024 * 1024:
+            await message.answer("TXT-файл слишком большой. Максимум 1 МБ.")
+            return
+        buffer = io.BytesIO()
+        try:
+            await bot.download(document, destination=buffer)
+            raw = buffer.getvalue()
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = raw.decode("utf-16")
+        except (OSError, UnicodeError):
+            await message.answer("Не удалось прочитать TXT-файл. Сохраните его в UTF-8.")
+            return
+        await accept_reference_text(
+            message,
+            state,
+            text=text,
+            source_name=filename,
+        )
+
+    @router.message(DraftStates.waiting_reference_list, F.text)
+    async def receive_reference_links(message: Message, state: FSMContext) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await accept_reference_text(
+            message,
+            state,
+            text=message.text or "",
+            source_name="telegram-message",
+        )
 
     @router.message(Command("queue"))
     @router.message(F.text == "Запланированные")

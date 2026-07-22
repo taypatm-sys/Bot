@@ -5,7 +5,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence, Union
 
-from app.models import ProductPreset, ScheduledPost
+from app.models import (
+    ProductPreset,
+    ReferenceAsset,
+    ReferenceImportJob,
+    ScheduledPost,
+)
 
 
 UTC = timezone.utc
@@ -61,6 +66,53 @@ def _row_to_preset(row: Mapping[str, Any]) -> ProductPreset:
         name=str(row["name"]),
         size=str(row["size"]),
         price=str(row["price"]),
+    )
+
+
+def _optional_datetime(value: Any) -> Optional[datetime]:
+    return _from_iso(value) if value else None
+
+
+def _row_to_reference_job(row: Mapping[str, Any]) -> ReferenceImportJob:
+    image_bytes = row["image_bytes"]
+    return ReferenceImportJob(
+        id=int(row["id"]),
+        source_url=str(row["source_url"]),
+        resolved_image_url=(
+            str(row["resolved_image_url"])
+            if row["resolved_image_url"]
+            else None
+        ),
+        image_bytes=bytes(image_bytes) if image_bytes is not None else None,
+        image_mime_type=(
+            str(row["image_mime_type"])
+            if row["image_mime_type"]
+            else None
+        ),
+        attempt_count=int(row["attempt_count"]),
+    )
+
+
+def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
+    try:
+        tags = json.loads(str(row["tags_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        tags = {}
+    if not isinstance(tags, dict):
+        tags = {}
+    return ReferenceAsset(
+        id=int(row["id"]),
+        source_url=str(row["source_url"]),
+        resolved_image_url=str(row["resolved_image_url"] or ""),
+        image_bytes=bytes(row["image_bytes"] or b""),
+        image_mime_type=str(row["image_mime_type"] or "image/jpeg"),
+        thumbnail_bytes=bytes(row["thumbnail_bytes"] or b""),
+        width=int(row["width"] or 0),
+        height=int(row["height"] or 0),
+        tags=tags,
+        use_count=int(row["use_count"] or 0),
+        last_used_at_utc=_optional_datetime(row["last_used_at_utc"]),
+        cooldown_until_utc=_optional_datetime(row["cooldown_until_utc"]),
     )
 
 
@@ -134,6 +186,7 @@ class PostRepository:
         id_column = "BIGSERIAL PRIMARY KEY" if self.database_url else (
             "INTEGER PRIMARY KEY AUTOINCREMENT"
         )
+        binary_column = "BYTEA" if self.database_url else "BLOB"
         with self._connect() as connection:
             if not self.database_url:
                 connection.execute("PRAGMA journal_mode=WAL")
@@ -160,6 +213,81 @@ class PostRepository:
                     created_at_utc TEXT NOT NULL
                 )
                 """,
+            )
+            self._execute(
+                connection,
+                f"""
+                CREATE TABLE IF NOT EXISTS reference_assets (
+                    id {id_column},
+                    source_url TEXT NOT NULL UNIQUE,
+                    pin_id TEXT,
+                    resolved_image_url TEXT,
+                    image_bytes {binary_column},
+                    image_mime_type TEXT,
+                    thumbnail_bytes {binary_column},
+                    width INTEGER,
+                    height INTEGER,
+                    image_sha256 TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '{{}}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at_utc TEXT,
+                    last_error TEXT,
+                    source_name TEXT NOT NULL DEFAULT '',
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at_utc TEXT,
+                    cooldown_until_utc TEXT,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                )
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE INDEX IF NOT EXISTS idx_reference_import_queue
+                ON reference_assets(status, next_retry_at_utc, id)
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE INDEX IF NOT EXISTS idx_reference_selection
+                ON reference_assets(status, cooldown_until_utc, use_count)
+                """,
+            )
+            self._execute(
+                connection,
+                f"""
+                CREATE TABLE IF NOT EXISTS reference_usages (
+                    id {id_column},
+                    reference_id BIGINT NOT NULL,
+                    request_token TEXT NOT NULL UNIQUE,
+                    garment_type TEXT NOT NULL,
+                    target_gender TEXT NOT NULL,
+                    moods_json TEXT NOT NULL DEFAULT '[]',
+                    outcome TEXT NOT NULL DEFAULT 'reserved',
+                    used_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                )
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE INDEX IF NOT EXISTS idx_reference_usage_asset
+                ON reference_usages(reference_id, used_at_utc)
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'retry', next_retry_at_utc = ?,
+                    last_error = 'Импорт был прерван перезапуском'
+                WHERE status = 'processing'
+                """,
+                (_iso(datetime.now(UTC)),),
             )
             self._migrate_post_columns(connection)
             self._execute(
@@ -333,6 +461,286 @@ class PostRepository:
             "mockup_recent_directions:v1",
             json.dumps(labels[-max(1, limit) :], ensure_ascii=False),
         )
+
+    def enqueue_reference_urls(
+        self,
+        urls: Sequence[str],
+        *,
+        source_name: str,
+    ) -> tuple[int, int]:
+        now = _iso(datetime.now(UTC))
+        added = 0
+        total = 0
+        with self._connect() as connection:
+            for url in urls:
+                clean_url = str(url).strip()
+                if not clean_url:
+                    continue
+                total += 1
+                cursor = self._execute(
+                    connection,
+                    """
+                    INSERT INTO reference_assets(
+                        source_url, status, source_name,
+                        created_at_utc, updated_at_utc
+                    ) VALUES (?, 'pending', ?, ?, ?)
+                    ON CONFLICT(source_url) DO NOTHING
+                    """,
+                    (clean_url, source_name[:200], now, now),
+                )
+                if cursor.rowcount == 1:
+                    added += 1
+        return added, total
+
+    def claim_reference_import(self) -> Optional[ReferenceImportJob]:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT id, source_url, resolved_image_url, image_bytes,
+                       image_mime_type, attempt_count
+                FROM reference_assets
+                WHERE status IN ('pending', 'retry')
+                  AND (next_retry_at_utc IS NULL OR next_retry_at_utc <= ?)
+                ORDER BY
+                    CASE WHEN image_bytes IS NOT NULL THEN 0 ELSE 1 END,
+                    id ASC
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if not row:
+                return None
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'processing', updated_at_utc = ?
+                WHERE id = ? AND status IN ('pending', 'retry')
+                """,
+                (now, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return _row_to_reference_job(row)
+
+    def store_reference_image(
+        self,
+        reference_id: int,
+        *,
+        pin_id: str,
+        resolved_image_url: str,
+        image_bytes: bytes,
+        image_mime_type: str,
+        thumbnail_bytes: bytes,
+        width: int,
+        height: int,
+        image_sha256: str,
+    ) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET pin_id = ?, resolved_image_url = ?, image_bytes = ?,
+                    image_mime_type = ?, thumbnail_bytes = ?, width = ?,
+                    height = ?, image_sha256 = ?, updated_at_utc = ?
+                WHERE id = ? AND status = 'processing'
+                """,
+                (
+                    pin_id,
+                    resolved_image_url,
+                    image_bytes,
+                    image_mime_type,
+                    thumbnail_bytes,
+                    width,
+                    height,
+                    image_sha256,
+                    now,
+                    reference_id,
+                ),
+            )
+
+    def mark_reference_ready(
+        self,
+        reference_id: int,
+        *,
+        tags: Mapping[str, Any],
+    ) -> None:
+        now = _iso(datetime.now(UTC))
+        usable = bool(tags.get("usable", True))
+        status = "ready" if usable else "disabled"
+        error = None if usable else str(tags.get("unusable_reason", ""))[:1000]
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET tags_json = ?, status = ?, last_error = ?,
+                    next_retry_at_utc = NULL, updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(dict(tags), ensure_ascii=False, separators=(",", ":")),
+                    status,
+                    error,
+                    now,
+                    reference_id,
+                ),
+            )
+
+    def mark_reference_import_error(
+        self,
+        reference_id: int,
+        *,
+        error: str,
+        retry_at_utc: datetime,
+        max_attempts: int,
+    ) -> str:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                "SELECT attempt_count FROM reference_assets WHERE id = ?",
+                (reference_id,),
+            ).fetchone()
+            attempts = (int(row["attempt_count"]) if row else 0) + 1
+            status = "failed" if attempts >= max_attempts else "retry"
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = ?, attempt_count = ?, next_retry_at_utc = ?,
+                    last_error = ?, updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    attempts,
+                    _iso(retry_at_utc),
+                    error[:1000],
+                    now,
+                    reference_id,
+                ),
+            )
+        return status
+
+    def retry_failed_references(self) -> int:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'retry', attempt_count = 0,
+                    next_retry_at_utc = ?, last_error = NULL,
+                    updated_at_utc = ?
+                WHERE status = 'failed'
+                """,
+                (now, now),
+            )
+            return int(cursor.rowcount)
+
+    def reference_stats(self) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT status, COUNT(*) AS amount
+                FROM reference_assets
+                GROUP BY status
+                """,
+            ).fetchall()
+        stats = {str(row["status"]): int(row["amount"]) for row in rows}
+        stats["total"] = sum(stats.values())
+        return stats
+
+    def list_ready_reference_assets(self, *, limit: int = 500) -> list[ReferenceAsset]:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM reference_assets
+                WHERE status = 'ready'
+                  AND image_bytes IS NOT NULL
+                  AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?)
+                ORDER BY use_count ASC, COALESCE(last_used_at_utc, '') ASC, id ASC
+                LIMIT ?
+                """,
+                (now, max(1, limit)),
+            ).fetchall()
+        return [_row_to_reference_asset(row) for row in rows]
+
+    def reserve_reference(
+        self,
+        reference_id: int,
+        *,
+        request_token: str,
+        garment_type: str,
+        target_gender: str,
+        moods: Sequence[str],
+        cooldown: timedelta = timedelta(days=30),
+    ) -> bool:
+        now_value = datetime.now(UTC)
+        now = _iso(now_value)
+        cooldown_until = _iso(now_value + cooldown)
+        with self._connect() as connection:
+            existing = self._execute(
+                connection,
+                "SELECT id FROM reference_usages WHERE request_token = ?",
+                (request_token,),
+            ).fetchone()
+            if existing:
+                return False
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET use_count = use_count + 1, last_used_at_utc = ?,
+                    cooldown_until_utc = ?, updated_at_utc = ?
+                WHERE id = ? AND status = 'ready'
+                  AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?)
+                """,
+                (now, cooldown_until, now, reference_id, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._execute(
+                connection,
+                """
+                INSERT INTO reference_usages(
+                    reference_id, request_token, garment_type, target_gender,
+                    moods_json, outcome, used_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?)
+                ON CONFLICT(request_token) DO NOTHING
+                """,
+                (
+                    reference_id,
+                    request_token,
+                    garment_type,
+                    target_gender,
+                    json.dumps(list(moods), ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        return True
+
+    def finish_reference_usage(self, request_token: str, *, outcome: str) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_usages
+                SET outcome = ?, updated_at_utc = ?
+                WHERE request_token = ?
+                """,
+                (outcome[:30], now, request_token),
+            )
 
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
         if self.get_setting("presets_seeded") == "1":

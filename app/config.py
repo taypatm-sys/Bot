@@ -24,6 +24,7 @@ LEGACY_GEMINI_MODELS = {
 }
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BUNDLED_CAPTION_TEMPLATE = PROJECT_ROOT / "caption_template.txt"
+BUNDLED_REFERENCE_SOURCES = PROJECT_ROOT / "reference_sources.txt"
 
 
 def normalize_gemini_model(value: str) -> str:
@@ -48,6 +49,26 @@ def _mockup_variants(value: str) -> int:
     if not 1 <= variants <= 4:
         raise ConfigError("MOCKUP_VARIANTS должен быть от 1 до 4")
     return variants
+
+
+def _positive_int(name: str, value: str, default: int) -> int:
+    try:
+        result = int(value.strip() or str(default))
+    except ValueError as error:
+        raise ConfigError(f"{name} должен быть целым числом") from error
+    if result < 1:
+        raise ConfigError(f"{name} должен быть больше нуля")
+    return result
+
+
+def _positive_float(name: str, value: str, default: float) -> float:
+    try:
+        result = float(value.strip() or str(default))
+    except ValueError as error:
+        raise ConfigError(f"{name} должен быть числом") from error
+    if result <= 0:
+        raise ConfigError(f"{name} должен быть больше нуля")
+    return result
 
 
 def _required(name: str) -> str:
@@ -94,6 +115,12 @@ class Config:
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
     gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
     mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
+    reference_sources_path: Path = BUNDLED_REFERENCE_SOURCES
+    reference_import_delay_seconds: float = 5.0
+    reference_idle_interval_seconds: float = 300.0
+    reference_max_attempts: int = 5
+    reference_min_pool_size: int = 20
+    reference_user_agent: str = "TaypaReferenceCatalog/4.0"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -141,6 +168,33 @@ class Config:
             ),
             mockup_variants=_mockup_variants(
                 os.getenv("MOCKUP_VARIANTS", str(DEFAULT_MOCKUP_VARIANTS))
+            ),
+            reference_sources_path=Path(
+                os.getenv("REFERENCE_SOURCES_PATH", str(BUNDLED_REFERENCE_SOURCES))
+            ),
+            reference_import_delay_seconds=_positive_float(
+                "REFERENCE_IMPORT_DELAY_SECONDS",
+                os.getenv("REFERENCE_IMPORT_DELAY_SECONDS", "5"),
+                5.0,
+            ),
+            reference_idle_interval_seconds=_positive_float(
+                "REFERENCE_IDLE_INTERVAL_SECONDS",
+                os.getenv("REFERENCE_IDLE_INTERVAL_SECONDS", "300"),
+                300.0,
+            ),
+            reference_max_attempts=_positive_int(
+                "REFERENCE_MAX_ATTEMPTS",
+                os.getenv("REFERENCE_MAX_ATTEMPTS", "5"),
+                5,
+            ),
+            reference_min_pool_size=_positive_int(
+                "REFERENCE_MIN_POOL_SIZE",
+                os.getenv("REFERENCE_MIN_POOL_SIZE", "20"),
+                20,
+            ),
+            reference_user_agent=(
+                os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/4.0").strip()
+                or "TaypaReferenceCatalog/4.0"
             ),
         )
 

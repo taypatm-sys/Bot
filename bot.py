@@ -10,6 +10,7 @@ from app.handlers import build_router
 from app.health import start_health_server
 from app.mockup_generator import MockupGenerator
 from app.publisher import Publisher
+from app.reference_catalog import ReferenceCatalog
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
 
@@ -49,6 +50,24 @@ async def main() -> None:
         image_model=config.gemini_image_model,
         image_size=config.gemini_image_size,
     )
+    reference_catalog = ReferenceCatalog(
+        repository=repository,
+        api_key=config.gemini_api_key,
+        analysis_model=config.gemini_model,
+        import_delay_seconds=config.reference_import_delay_seconds,
+        idle_interval_seconds=config.reference_idle_interval_seconds,
+        max_attempts=config.reference_max_attempts,
+        min_pool_size=config.reference_min_pool_size,
+        user_agent=config.reference_user_agent,
+    )
+    added_references, total_seed_references = reference_catalog.seed_file(
+        config.reference_sources_path
+    )
+    logging.getLogger(__name__).info(
+        "Стартовый список референсов: добавлено %s из %s",
+        added_references,
+        total_seed_references,
+    )
     publisher = Publisher(
         bot=bot,
         config=config,
@@ -63,6 +82,7 @@ async def main() -> None:
             repository=repository,
             copywriter=copywriter,
             mockup_generator=mockup_generator,
+            reference_catalog=reference_catalog,
             publisher=publisher,
             template_store=template_store,
         )
@@ -70,6 +90,7 @@ async def main() -> None:
 
     health_runner = await start_health_server()
     scheduler_task = asyncio.create_task(publisher.run_scheduler())
+    reference_task = asyncio.create_task(reference_catalog.run())
     try:
         await bot.set_my_commands(
             [
@@ -79,6 +100,7 @@ async def main() -> None:
                 BotCommand(command="settemplate", description="Изменить шаблон"),
                 BotCommand(command="presets", description="Готовые пресеты"),
                 BotCommand(command="model", description="Фото на модели"),
+                BotCommand(command="references", description="База референсов"),
                 BotCommand(command="check", description="Проверить настройки"),
                 BotCommand(command="cancel", description="Отменить черновик"),
             ]
@@ -89,7 +111,9 @@ async def main() -> None:
         )
     finally:
         scheduler_task.cancel()
-        await asyncio.gather(scheduler_task, return_exceptions=True)
+        await reference_catalog.stop()
+        reference_task.cancel()
+        await asyncio.gather(scheduler_task, reference_task, return_exceptions=True)
         if health_runner is not None:
             await health_runner.cleanup()
         repository.close()

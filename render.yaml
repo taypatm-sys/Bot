@@ -29,6 +29,14 @@ services:
         value: 1K
       - key: MOCKUP_VARIANTS
         value: 1
+      - key: REFERENCE_IMPORT_DELAY_SECONDS
+        value: 5
+      - key: REFERENCE_IDLE_INTERVAL_SECONDS
+        value: 300
+      - key: REFERENCE_MAX_ATTEMPTS
+        value: 5
+      - key: REFERENCE_MIN_POOL_SIZE
+        value: 20
       - key: BUTTON_TEXT
         value: Написать
       - key: COPY_LANGUAGE

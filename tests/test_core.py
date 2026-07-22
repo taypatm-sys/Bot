@@ -32,6 +32,7 @@ from app.mockup_generator import (
     build_model_photo_prompt,
     choose_photo_directions,
 )
+from app.reference_catalog import ReferenceCatalog, normalize_reference_urls
 from app.scheduling import parse_local_datetime
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
@@ -379,6 +380,82 @@ class SchedulingTests(unittest.TestCase):
             result.astimezone(self.timezone).strftime("%d.%m.%Y %H:%M"),
             "22.07.2026 09:30",
         )
+
+
+class ReferenceCatalogTests(unittest.TestCase):
+    def test_pinterest_links_are_canonicalized_and_deduplicated(self) -> None:
+        urls = normalize_reference_urls(
+            """
+            https://ru.pinterest.com/pin/12345/?utm_source=test
+            https://www.pinterest.com/pin/12345/
+            https://pin.it/AbCdEf
+            https://example.com/not-accepted
+            """
+        )
+        self.assertEqual(
+            urls,
+            [
+                "https://www.pinterest.com/pin/12345/",
+                "https://pin.it/AbCdEf",
+            ],
+        )
+
+    def test_catalog_selects_and_reserves_best_matching_reference(self) -> None:
+        tags = {
+            "garment_types": ["t-shirt", "sweatshirt"],
+            "gender": "women",
+            "moods": ["calm", "playful"],
+            "pose_kind": "sitting",
+            "action": "reading",
+            "location_category": "home",
+            "setting": "ordinary living room",
+            "camera_angle": "three-quarter",
+            "framing": "three-quarter",
+            "lighting": "daylight",
+            "season": "all-season",
+            "print_side_visible": "front",
+            "print_area_visibility": 92,
+            "composition_notes": "relaxed seated phone photo",
+            "usable": True,
+            "unusable_reason": "",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            repository.enqueue_reference_urls(
+                ["https://www.pinterest.com/pin/12345/"],
+                source_name="test",
+            )
+            job = repository.claim_reference_import()
+            repository.store_reference_image(
+                job.id,
+                pin_id="12345",
+                resolved_image_url="https://i.pinimg.com/originals/test.jpg",
+                image_bytes=b"reference-image",
+                image_mime_type="image/jpeg",
+                thumbnail_bytes=b"thumbnail",
+                width=1200,
+                height=1600,
+                image_sha256="abc",
+            )
+            repository.mark_reference_ready(job.id, tags=tags)
+
+            catalog = object.__new__(ReferenceCatalog)
+            catalog.repository = repository
+            catalog.min_pool_size = 20
+            selected = catalog.select_reference(
+                garment_type="t-shirt",
+                target_gender="women",
+                moods=["calm"],
+                request_token="request-1",
+                rng=random.Random(10),
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected.id, job.id)
+            self.assertEqual(repository.reference_stats()["ready"], 1)
+            self.assertEqual(repository.list_ready_reference_assets(), [])
+            repository.finish_reference_usage("request-1", outcome="completed")
 
 
 class StorageTests(unittest.TestCase):

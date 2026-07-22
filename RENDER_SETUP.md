@@ -66,16 +66,24 @@ GEMINI_MODEL
 GEMINI_IMAGE_MODEL
 GEMINI_IMAGE_SIZE
 MOCKUP_VARIANTS
+REFERENCE_IMPORT_DELAY_SECONDS
+REFERENCE_IDLE_INTERVAL_SECONDS
+REFERENCE_MAX_ATTEMPTS
+REFERENCE_MIN_POOL_SIZE
 BUTTON_TEXT
 COPY_LANGUAGE
 ```
 
-Если трех новых переменных еще нет, добавьте их со значениями:
+Если новых переменных еще нет, добавьте их со значениями:
 
 ```text
 GEMINI_IMAGE_MODEL=gemini-3.1-flash-lite-image
 GEMINI_IMAGE_SIZE=1K
 MOCKUP_VARIANTS=1
+REFERENCE_IMPORT_DELAY_SECONDS=5
+REFERENCE_IDLE_INTERVAL_SECONDS=300
+REFERENCE_MAX_ATTEMPTS=5
+REFERENCE_MIN_POOL_SIZE=20
 ```
 
 Официальная инструкция Render:
@@ -127,6 +135,10 @@ Run polling for bot
 Фото на модели: gemini-3.1-flash-lite-image, 1K, 4:5
 ```
 
+Также отправьте `/references`. Сразу после первого запуска должно быть 63 ссылки
+в очереди. Число `Готово` будет постепенно увеличиваться, потому что изображения
+загружаются и размечаются по одному в фоне.
+
 Если указано `База: SQLite`, переменная `DATABASE_URL` не сохранена или сервис
 не был заново развернут.
 
@@ -153,6 +165,7 @@ https://bot-y92e.onrender.com/health
 - Публикация поста прямо из очереди.
 - Создание копии запланированного поста.
 - Готовые пресеты и добавление своих через `/presets`.
+- Каталог референсов в Neon и загрузка новых TXT-списков через `/references`.
 - Создание одной реалистичной фотографии 4:5 из готового макета.
 - Разные люди, лица, позы и локации в каждой серии.
 - Выбор сгенерированной фотографии для нового поста.
