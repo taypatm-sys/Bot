@@ -1,5 +1,6 @@
 import io
 import logging
+import secrets
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
@@ -7,6 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -26,6 +28,12 @@ from app.formatting import (
     split_product_title,
 )
 from app.models import ProductPreset, ScheduledPost
+from app.mockup_generator import (
+    MockupGenerationError,
+    MockupGenerator,
+    MockupSpec,
+    choose_photo_directions,
+)
 from app.publisher import Publisher
 from app.scheduling import (
     format_local,
@@ -43,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 
 class DraftStates(StatesGroup):
+    waiting_model_mockup = State()
+    generating_model_photos = State()
+    model_photos_ready = State()
     waiting_size = State()
     waiting_custom_size = State()
     waiting_price = State()
@@ -63,7 +74,10 @@ class DraftStates(StatesGroup):
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Создать пост")],
+            [
+                KeyboardButton(text="Создать пост"),
+                KeyboardButton(text="Фото на модели"),
+            ],
             [
                 KeyboardButton(text="Запланированные"),
                 KeyboardButton(text="Пресеты"),
@@ -71,6 +85,38 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Шаблон")],
         ],
         resize_keyboard=True,
+    )
+
+
+def model_photo_keyboard(batch_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Создать пост из этого",
+                    callback_data=f"model:post:{batch_id}:{index}",
+                )
+            ]
+        ]
+    )
+
+
+def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Еще {count} варианта",
+                    callback_data=f"model:more:{batch_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закончить",
+                    callback_data=f"model:done:{batch_id}",
+                )
+            ],
+        ]
     )
 
 
@@ -358,10 +404,163 @@ def build_router(
     config: Config,
     repository: PostRepository,
     copywriter: ImageCopywriter,
+    mockup_generator: MockupGenerator,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
 ) -> Router:
     router = Router()
+
+    async def prepare_post_draft(
+        *,
+        message: Message,
+        state: FSMContext,
+        waiting: Message,
+        photo_file_id: str,
+        image_bytes: bytes,
+        mime_type: str,
+    ) -> bool:
+        try:
+            generated = await copywriter.create_copy(image_bytes, mime_type)
+        except Exception:
+            logger.exception("Не удалось создать текст по изображению")
+            await waiting.edit_text(
+                "Не удалось проанализировать изображение. Проверьте GEMINI_API_KEY "
+                "и повторите отправку."
+            )
+            return False
+
+        await state.clear()
+        await state.update_data(
+            photo_file_id=photo_file_id,
+            title=generated.title,
+            description=generated.description,
+            garment_type=generated.garment_type,
+            design_name=generated.design_name,
+            theme_hashtag=generated.theme_hashtag,
+        )
+        presets = repository.list_presets()
+        if presets:
+            await waiting.edit_text(
+                f"Название: {generated.title}\n\nВыберите готовый пресет:",
+                reply_markup=preset_choice_keyboard(presets),
+            )
+        else:
+            await state.set_state(DraftStates.waiting_size)
+            await waiting.edit_text(
+                f"Название: {generated.title}\n\nВыберите доступные размеры:",
+                reply_markup=size_keyboard(),
+            )
+        return True
+
+    async def generate_model_batch(
+        *,
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+        status_message: Message,
+    ) -> None:
+        data = await state.get_data()
+        source_file_id = data.get("model_source_file_id")
+        source_mime_type = data.get("model_source_mime_type", "image/jpeg")
+        if not source_file_id:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Макет не найден. Отправьте его еще раз.",
+            )
+            return
+
+        await state.set_state(DraftStates.generating_model_photos)
+        source_buffer = io.BytesIO()
+        try:
+            await bot.download(source_file_id, destination=source_buffer)
+        except Exception:
+            logger.exception("Не удалось скачать исходный макет")
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Не удалось скачать макет из Telegram. Отправьте его еще раз."
+            )
+            return
+
+        source_bytes = source_buffer.getvalue()
+        stored_spec = data.get("model_mockup_spec")
+        if stored_spec:
+            spec = MockupSpec.model_validate(stored_spec)
+        else:
+            await status_message.edit_text(
+                "Определяю сторону, цвет, размер и положение принта..."
+            )
+            spec = await mockup_generator.analyze_mockup(
+                source_bytes,
+                source_mime_type,
+            )
+            await state.update_data(
+                model_mockup_spec=spec.model_dump() if spec else None
+            )
+
+        batch_id = secrets.token_hex(4)
+        directions = choose_photo_directions(config.mockup_variants)
+        generated_file_ids: list[str] = []
+        generation_error: str | None = None
+
+        for index, direction in enumerate(directions, start=1):
+            await status_message.edit_text(
+                f"Создаю вариант {index} из {len(directions)}. "
+                "Лицо, поза и место будут новыми..."
+            )
+            try:
+                generated_photo = await mockup_generator.generate_variant(
+                    image_bytes=source_bytes,
+                    mime_type=source_mime_type,
+                    spec=spec,
+                    direction=direction,
+                    request_token=batch_id,
+                )
+            except MockupGenerationError as error:
+                generation_error = error.user_message
+                break
+
+            sent = await message.answer_photo(
+                photo=BufferedInputFile(
+                    generated_photo.data,
+                    filename=(
+                        f"taypa_model_{batch_id}_{index}."
+                        f"{generated_photo.extension}"
+                    ),
+                ),
+                caption=(
+                    f"Вариант {index} из {len(directions)}\n"
+                    f"{direction.label}\nФормат 4:5"
+                ),
+                reply_markup=model_photo_keyboard(batch_id, index - 1),
+            )
+            generated_file_ids.append(sent.photo[-1].file_id)
+
+        if not generated_file_ids:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                generation_error
+                or "Не удалось создать варианты. Отправьте макет еще раз."
+            )
+            return
+
+        await state.update_data(
+            model_batch_id=batch_id,
+            model_generated_file_ids=generated_file_ids,
+        )
+        await state.set_state(DraftStates.model_photos_ready)
+        result_text = (
+            f"Готово: {len(generated_file_ids)} вариантов. Выберите фотографию "
+            "для поста или запросите новые."
+        )
+        if generation_error:
+            result_text += f"\n\nСледующий вариант не создан: {generation_error}"
+        await status_message.edit_text(
+            result_text,
+            reply_markup=model_batch_keyboard(
+                batch_id,
+                config.mockup_variants,
+            ),
+        )
 
     @router.message(CommandStart())
     async def start(message: Message, state: FSMContext) -> None:
@@ -374,7 +573,8 @@ def build_router(
             else "Работаю с локальной базой SQLite."
         )
         await message.answer(
-            "Бот готов. Отправьте фотографию или нажмите «Создать пост».\n"
+            "Бот готов. Для обычной публикации отправьте фотографию. Для создания "
+            "реалистичных кадров из макета нажмите «Фото на модели».\n"
             f"{storage_note}",
             reply_markup=main_keyboard(),
         )
@@ -400,7 +600,9 @@ def build_router(
                 f"Бот: @{bot_info.username}\n"
                 f"Канал: {chat.title or chat.id}\n"
                 f"Статус бота в канале: {member.status}\n"
-                f"База: {repository.backend_name}"
+                f"База: {repository.backend_name}\n"
+                f"Фото на модели: {config.gemini_image_model}, "
+                f"{config.gemini_image_size}, 4:5"
             )
         except Exception as error:
             logger.exception("Проверка настроек не пройдена")
@@ -791,6 +993,179 @@ def build_router(
                 reply_markup=preset_manager_keyboard(presets)
             )
 
+    @router.message(Command("model"))
+    @router.message(F.text == "Фото на модели")
+    async def request_model_mockup(message: Message, state: FSMContext) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await state.clear()
+        await state.set_state(DraftStates.waiting_model_mockup)
+        await message.answer(
+            "Отправьте готовый макет одежды. Лучше отправить его как файл PNG или "
+            "JPEG, тогда мелкий текст и детали принта сохранятся точнее.\n\n"
+            f"Бот создаст {config.mockup_variants} разных реалистичных фото 4:5."
+        )
+
+    async def accept_model_mockup(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+        *,
+        file_id: str,
+        mime_type: str,
+    ) -> None:
+        await state.clear()
+        await state.update_data(
+            model_source_file_id=file_id,
+            model_source_mime_type=mime_type,
+            model_mockup_spec=None,
+        )
+        status_message = await message.answer(
+            "Макет принят. Сначала измеряю принт, затем создаю фотографии. "
+            "Это может занять несколько минут."
+        )
+        await generate_model_batch(
+            message=message,
+            state=state,
+            bot=bot,
+            status_message=status_message,
+        )
+
+    @router.message(DraftStates.waiting_model_mockup, F.photo)
+    async def receive_model_photo(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await accept_model_mockup(
+            message,
+            state,
+            bot,
+            file_id=message.photo[-1].file_id,
+            mime_type="image/jpeg",
+        )
+
+    @router.message(DraftStates.waiting_model_mockup, F.document)
+    async def receive_model_document(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_message(message, config):
+            return
+        document = message.document
+        mime_type = document.mime_type or ""
+        if not mime_type.startswith("image/"):
+            await message.answer("Нужен файл изображения PNG, JPEG или WEBP.")
+            return
+        await accept_model_mockup(
+            message,
+            state,
+            bot,
+            file_id=document.file_id,
+            mime_type=mime_type,
+        )
+
+    @router.callback_query(F.data.startswith("model:more:"))
+    async def more_model_photos(
+        callback: CallbackQuery,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        data = await state.get_data()
+        batch_id = callback.data.rsplit(":", 1)[1]
+        if data.get("model_batch_id") != batch_id:
+            await callback.answer("Эта серия уже закрыта", show_alert=True)
+            return
+        if await state.get_state() == DraftStates.generating_model_photos.state:
+            await callback.answer("Фотографии уже создаются", show_alert=True)
+            return
+        await callback.answer("Создаю новые варианты")
+        if callback.message:
+            status_message = await callback.message.answer(
+                "Готовлю новую серию с другими людьми и локациями..."
+            )
+            await generate_model_batch(
+                message=callback.message,
+                state=state,
+                bot=bot,
+                status_message=status_message,
+            )
+
+    @router.callback_query(F.data.startswith("model:done:"))
+    async def finish_model_photos(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        data = await state.get_data()
+        batch_id = callback.data.rsplit(":", 1)[1]
+        if data.get("model_batch_id") != batch_id:
+            await callback.answer("Эта серия уже закрыта", show_alert=True)
+            return
+        await state.clear()
+        await callback.answer("Готово")
+        if callback.message:
+            await callback.message.answer(
+                "Генерация завершена.",
+                reply_markup=main_keyboard(),
+            )
+
+    @router.callback_query(F.data.startswith("model:post:"))
+    async def post_from_model_photo(
+        callback: CallbackQuery,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        parts = callback.data.split(":")
+        if len(parts) != 4:
+            await callback.answer("Кнопка устарела", show_alert=True)
+            return
+        batch_id = parts[2]
+        try:
+            index = int(parts[3])
+        except ValueError:
+            await callback.answer("Кнопка устарела", show_alert=True)
+            return
+        data = await state.get_data()
+        file_ids = data.get("model_generated_file_ids", [])
+        if data.get("model_batch_id") != batch_id or not 0 <= index < len(file_ids):
+            await callback.answer("Эта серия уже закрыта", show_alert=True)
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+
+        selected_file_id = file_ids[index]
+        await callback.answer("Фотография выбрана")
+        waiting = await callback.message.answer(
+            "Анализирую выбранную фотографию и пишу текст поста..."
+        )
+        buffer = io.BytesIO()
+        try:
+            await bot.download(selected_file_id, destination=buffer)
+        except Exception:
+            logger.exception("Не удалось скачать выбранное фото")
+            await waiting.edit_text(
+                "Не удалось скачать фотографию из Telegram. Выберите ее еще раз."
+            )
+            return
+        await prepare_post_draft(
+            message=callback.message,
+            state=state,
+            waiting=waiting,
+            photo_file_id=selected_file_id,
+            image_bytes=buffer.getvalue(),
+            mime_type="image/jpeg",
+        )
+
     @router.message(F.text == "Создать пост")
     async def create_post_hint(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config):
@@ -808,35 +1183,20 @@ def build_router(
         buffer = io.BytesIO()
         try:
             await bot.download(photo, destination=buffer)
-            generated = await copywriter.create_copy(buffer.getvalue(), "image/jpeg")
         except Exception:
-            logger.exception("Не удалось создать текст по изображению")
+            logger.exception("Не удалось скачать изображение")
             await waiting.edit_text(
-                "Не удалось проанализировать изображение. Проверьте GEMINI_API_KEY "
-                "и повторите отправку."
+                "Не удалось скачать изображение из Telegram. Повторите отправку."
             )
             return
-
-        await state.update_data(
+        await prepare_post_draft(
+            message=message,
+            state=state,
+            waiting=waiting,
             photo_file_id=photo.file_id,
-            title=generated.title,
-            description=generated.description,
-            garment_type=generated.garment_type,
-            design_name=generated.design_name,
-            theme_hashtag=generated.theme_hashtag,
+            image_bytes=buffer.getvalue(),
+            mime_type="image/jpeg",
         )
-        presets = repository.list_presets()
-        if presets:
-            await waiting.edit_text(
-                f"Название: {generated.title}\n\nВыберите готовый пресет:",
-                reply_markup=preset_choice_keyboard(presets),
-            )
-        else:
-            await state.set_state(DraftStates.waiting_size)
-            await waiting.edit_text(
-                f"Название: {generated.title}\n\nВыберите доступные размеры:",
-                reply_markup=size_keyboard(),
-            )
 
     @router.callback_query(F.data.startswith("preset:use:"))
     async def use_preset(callback: CallbackQuery, state: FSMContext) -> None:

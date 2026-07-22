@@ -15,6 +15,9 @@ class ConfigError(RuntimeError):
 
 ChatId = Union[int, str]
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+DEFAULT_GEMINI_IMAGE_SIZE = "1K"
+DEFAULT_MOCKUP_VARIANTS = 3
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
     "models/gemini-2.5-flash",
@@ -28,6 +31,23 @@ def normalize_gemini_model(value: str) -> str:
     if not model or model in LEGACY_GEMINI_MODELS:
         return DEFAULT_GEMINI_MODEL
     return model
+
+
+def normalize_gemini_image_size(value: str) -> str:
+    image_size = value.strip().upper() or DEFAULT_GEMINI_IMAGE_SIZE
+    if image_size not in {"1K", "2K", "4K"}:
+        raise ConfigError("GEMINI_IMAGE_SIZE должен быть 1K, 2K или 4K")
+    return image_size
+
+
+def _mockup_variants(value: str) -> int:
+    try:
+        variants = int(value)
+    except ValueError as error:
+        raise ConfigError("MOCKUP_VARIANTS должен быть целым числом") from error
+    if not 1 <= variants <= 4:
+        raise ConfigError("MOCKUP_VARIANTS должен быть от 1 до 4")
+    return variants
 
 
 def _required(name: str) -> str:
@@ -71,6 +91,9 @@ class Config:
     database_path: Path
     caption_template_path: Path
     database_url: str = ""
+    gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
+    gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
+    mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -109,6 +132,16 @@ class Config:
                 os.getenv("CAPTION_TEMPLATE_PATH", "caption_template.txt")
             ),
             database_url=database_url,
+            gemini_image_model=(
+                os.getenv("GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL).strip()
+                or DEFAULT_GEMINI_IMAGE_MODEL
+            ),
+            gemini_image_size=normalize_gemini_image_size(
+                os.getenv("GEMINI_IMAGE_SIZE", DEFAULT_GEMINI_IMAGE_SIZE)
+            ),
+            mockup_variants=_mockup_variants(
+                os.getenv("MOCKUP_VARIANTS", str(DEFAULT_MOCKUP_VARIANTS))
+            ),
         )
 
     @property
