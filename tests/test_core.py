@@ -203,6 +203,17 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertEqual(dumped["imageConfig"]["aspectRatio"], "4:5")
         self.assertEqual(dumped["imageConfig"]["imageSize"], "1K")
         self.assertEqual(dumped["responseModalities"], ["IMAGE"])
+        self.assertNotIn("outputMimeType", dumped["imageConfig"])
+        self.assertNotIn("outputCompressionQuality", dumped["imageConfig"])
+        self.assertNotIn("seed", dumped)
+
+    def test_invalid_argument_error_is_explained(self) -> None:
+        class FakeInvalidArgument(Exception):
+            code = 400
+
+        error = FakeInvalidArgument("INVALID_ARGUMENT")
+        friendly = MockupGenerator._friendly_error(error)
+        self.assertIn("ошибка 400", friendly.user_message)
 
 
 class ConfigTests(unittest.TestCase):
@@ -219,7 +230,10 @@ class ConfigTests(unittest.TestCase):
         )
 
     def test_default_image_model_and_valid_size(self) -> None:
-        self.assertEqual(DEFAULT_GEMINI_IMAGE_MODEL, "gemini-3.1-flash-image")
+        self.assertEqual(
+            DEFAULT_GEMINI_IMAGE_MODEL,
+            "gemini-3.1-flash-lite-image",
+        )
         self.assertEqual(normalize_gemini_image_size(" 2k "), "2K")
 
     def test_invalid_image_size_is_rejected(self) -> None:

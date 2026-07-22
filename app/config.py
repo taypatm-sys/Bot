@@ -15,9 +15,9 @@ class ConfigError(RuntimeError):
 
 ChatId = Union[int, str]
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
-DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 DEFAULT_GEMINI_IMAGE_SIZE = "1K"
-DEFAULT_MOCKUP_VARIANTS = 3
+DEFAULT_MOCKUP_VARIANTS = 1
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
     "models/gemini-2.5-flash",

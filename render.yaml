@@ -24,7 +24,7 @@ services:
       - key: GEMINI_MODEL
         value: gemini-3.1-flash-lite
       - key: GEMINI_IMAGE_MODEL
-        value: gemini-3.1-flash-image
+        value: gemini-3.1-flash-lite-image
       - key: GEMINI_IMAGE_SIZE
         value: 1K
       - key: MOCKUP_VARIANTS

@@ -102,11 +102,12 @@ def model_photo_keyboard(batch_id: str, index: int) -> InlineKeyboardMarkup:
 
 
 def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
+    count_label = "1 вариант" if count == 1 else f"{count} варианта"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Еще {count} варианта",
+                    text=f"Еще {count_label}",
                     callback_data=f"model:more:{batch_id}",
                 )
             ],
@@ -1000,10 +1001,15 @@ def build_router(
             return
         await state.clear()
         await state.set_state(DraftStates.waiting_model_mockup)
+        generation_count = (
+            "одно реалистичное фото"
+            if config.mockup_variants == 1
+            else f"{config.mockup_variants} разных реалистичных фото"
+        )
         await message.answer(
             "Отправьте готовый макет одежды. Лучше отправить его как файл PNG или "
             "JPEG, тогда мелкий текст и детали принта сохранятся точнее.\n\n"
-            f"Бот создаст {config.mockup_variants} разных реалистичных фото 4:5."
+            f"Бот создаст {generation_count} 4:5."
         )
 
     async def accept_model_mockup(

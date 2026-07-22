@@ -338,12 +338,9 @@ class MockupGenerator:
             ],
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE"],
-                seed=direction.seed,
                 image_config=types.ImageConfig(
                     aspect_ratio=self.aspect_ratio,
                     image_size=self.image_size,
-                    output_mime_type="image/jpeg",
-                    output_compression_quality=95,
                 ),
             ),
         )
@@ -393,6 +390,19 @@ class MockupGenerator:
             return MockupGenerationError(
                 "Модель генерации изображений недоступна для этого ключа Gemini. "
                 "Проверьте GEMINI_IMAGE_MODEL в Render."
+            )
+        if code in {401, 403} or any(
+            marker in message
+            for marker in ("UNAUTHENTICATED", "API_KEY_INVALID", "INVALID API KEY")
+        ):
+            return MockupGenerationError(
+                "Ключ Gemini API недействителен или не имеет доступа к модели. "
+                "Проверьте GEMINI_API_KEY в Render."
+            )
+        if code == 400 or "INVALID_ARGUMENT" in message:
+            return MockupGenerationError(
+                "Gemini отклонил параметры запроса, ошибка 400. Установите "
+                "исправленную версию бота и попробуйте еще раз."
             )
         if "SAFETY" in message or "BLOCK" in message:
             return MockupGenerationError(
