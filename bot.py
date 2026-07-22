@@ -58,6 +58,7 @@ async def main() -> None:
         idle_interval_seconds=config.reference_idle_interval_seconds,
         max_attempts=config.reference_max_attempts,
         min_pool_size=config.reference_min_pool_size,
+        analysis_timeout_seconds=config.reference_analysis_timeout_seconds,
         user_agent=config.reference_user_agent,
     )
     added_references, total_seed_references = reference_catalog.seed_file(

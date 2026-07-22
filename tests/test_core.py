@@ -457,6 +457,73 @@ class ReferenceCatalogTests(unittest.TestCase):
             self.assertEqual(repository.list_ready_reference_assets(), [])
             repository.finish_reference_usage("request-1", outcome="completed")
 
+    def test_status_separates_queue_processing_and_delayed_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            repository.enqueue_reference_urls(
+                [
+                    "https://www.pinterest.com/pin/10001/",
+                    "https://www.pinterest.com/pin/10002/",
+                    "https://www.pinterest.com/pin/10003/",
+                ],
+                source_name="test",
+            )
+            processing = repository.claim_reference_import()
+            retry_job = repository.claim_reference_import()
+            repository.mark_reference_import_error(
+                retry_job.id,
+                error="Pinterest временно ограничил частоту запросов",
+                retry_at_utc=datetime.now(timezone.utc) + timedelta(hours=1),
+                max_attempts=5,
+            )
+
+            catalog = object.__new__(ReferenceCatalog)
+            catalog.repository = repository
+            catalog.min_pool_size = 20
+            status = catalog.status_text()
+
+            self.assertIsNotNone(processing)
+            self.assertIn("В очереди: 1", status)
+            self.assertIn("Сейчас обрабатывается: 1", status)
+            self.assertIn("Ждут повторной попытки: 1", status)
+            self.assertIn("временное ограничение Pinterest: 1", status)
+
+    def test_resume_now_releases_delayed_and_stale_reference_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            repository.initialize()
+            repository.enqueue_reference_urls(
+                [
+                    "https://www.pinterest.com/pin/20001/",
+                    "https://www.pinterest.com/pin/20002/",
+                ],
+                source_name="test",
+            )
+            retry_job = repository.claim_reference_import()
+            repository.mark_reference_import_error(
+                retry_job.id,
+                error="temporary",
+                retry_at_utc=datetime.now(timezone.utc) + timedelta(hours=8),
+                max_attempts=5,
+            )
+            stale_job = repository.claim_reference_import()
+            stale_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            with repository._connect() as connection:
+                repository._execute(
+                    connection,
+                    "UPDATE reference_assets SET updated_at_utc = ? WHERE id = ?",
+                    (stale_time, stale_job.id),
+                )
+
+            counts = repository.resume_reference_imports(
+                stale_after=timedelta(minutes=10)
+            )
+
+            self.assertEqual(counts["retry"], 1)
+            self.assertEqual(counts["stale"], 1)
+            self.assertEqual(repository.reference_stats().get("retry"), 2)
+
 
 class StorageTests(unittest.TestCase):
     def test_recent_mockup_directions_persist_without_duplicates(self) -> None:

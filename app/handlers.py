@@ -137,7 +137,7 @@ def references_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Повторить ошибки",
+                    text="Продолжить сейчас",
                     callback_data="references:retry",
                 ),
                 InlineKeyboardButton(
@@ -730,8 +730,12 @@ def build_router(
     async def retry_references(callback: CallbackQuery) -> None:
         if not await is_admin_callback(callback, config):
             return
-        count = reference_catalog.retry_failed()
-        await callback.answer(f"Повторно поставлено: {count}")
+        counts = reference_catalog.resume_now()
+        count = sum(counts.values())
+        if count:
+            await callback.answer(f"Продолжено задач: {count}")
+        else:
+            await callback.answer("Нет ожидающих или зависших задач")
         if callback.message:
             await callback.message.edit_text(
                 reference_catalog.status_text(),

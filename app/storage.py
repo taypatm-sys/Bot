@@ -643,6 +643,75 @@ class PostRepository:
             )
             return int(cursor.rowcount)
 
+    def resume_reference_imports(
+        self,
+        *,
+        stale_after: timedelta = timedelta(minutes=10),
+    ) -> dict[str, int]:
+        """Make delayed retries due now and recover abandoned processing leases."""
+        now_value = datetime.now(UTC)
+        now = _iso(now_value)
+        stale_before = _iso(now_value - stale_after)
+        with self._connect() as connection:
+            retry_cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET next_retry_at_utc = ?, updated_at_utc = ?
+                WHERE status = 'retry'
+                """,
+                (now, now),
+            )
+            failed_cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'retry', attempt_count = 0,
+                    next_retry_at_utc = ?, last_error = NULL,
+                    updated_at_utc = ?
+                WHERE status = 'failed'
+                """,
+                (now, now),
+            )
+            stale_cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'retry', next_retry_at_utc = ?,
+                    last_error = 'Зависшая обработка автоматически восстановлена',
+                    updated_at_utc = ?
+                WHERE status = 'processing' AND updated_at_utc <= ?
+                """,
+                (now, now, stale_before),
+            )
+        return {
+            "retry": int(retry_cursor.rowcount),
+            "failed": int(failed_cursor.rowcount),
+            "stale": int(stale_cursor.rowcount),
+        }
+
+    def recover_stale_reference_imports(
+        self,
+        *,
+        stale_after: timedelta = timedelta(minutes=10),
+    ) -> int:
+        now_value = datetime.now(UTC)
+        now = _iso(now_value)
+        stale_before = _iso(now_value - stale_after)
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET status = 'retry', next_retry_at_utc = ?,
+                    last_error = 'Зависшая обработка автоматически восстановлена',
+                    updated_at_utc = ?
+                WHERE status = 'processing' AND updated_at_utc <= ?
+                """,
+                (now, now, stale_before),
+            )
+            return int(cursor.rowcount)
+
     def reference_stats(self) -> dict[str, int]:
         with self._connect() as connection:
             rows = self._execute(
@@ -656,6 +725,39 @@ class PostRepository:
         stats = {str(row["status"]): int(row["amount"]) for row in rows}
         stats["total"] = sum(stats.values())
         return stats
+
+    def reference_queue_details(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            retry_row = self._execute(
+                connection,
+                """
+                SELECT MIN(next_retry_at_utc) AS next_retry_at_utc
+                FROM reference_assets
+                WHERE status = 'retry'
+                """,
+            ).fetchone()
+            reason_rows = self._execute(
+                connection,
+                """
+                SELECT last_error, COUNT(*) AS amount
+                FROM reference_assets
+                WHERE status IN ('retry', 'failed')
+                  AND last_error IS NOT NULL AND last_error <> ''
+                GROUP BY last_error
+                ORDER BY amount DESC
+                LIMIT 3
+                """,
+            ).fetchall()
+        next_retry = None
+        if retry_row and retry_row["next_retry_at_utc"]:
+            next_retry = _from_iso(retry_row["next_retry_at_utc"])
+        return {
+            "next_retry_at_utc": next_retry,
+            "reasons": [
+                (str(row["last_error"]), int(row["amount"]))
+                for row in reason_rows
+            ],
+        }
 
     def list_ready_reference_assets(self, *, limit: int = 500) -> list[ReferenceAsset]:
         now = _iso(datetime.now(UTC))

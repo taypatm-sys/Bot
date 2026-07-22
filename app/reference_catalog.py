@@ -220,6 +220,7 @@ class ReferenceCatalog:
         idle_interval_seconds: float = 300.0,
         max_attempts: int = 5,
         min_pool_size: int = 20,
+        analysis_timeout_seconds: float = 90.0,
         user_agent: str = "TaypaReferenceCatalog/4.0",
     ) -> None:
         self.repository = repository
@@ -229,6 +230,7 @@ class ReferenceCatalog:
         self.idle_interval_seconds = max(30.0, idle_interval_seconds)
         self.max_attempts = max(1, max_attempts)
         self.min_pool_size = max(1, min_pool_size)
+        self.analysis_timeout_seconds = max(30.0, analysis_timeout_seconds)
         self.user_agent = user_agent
         self._wake_event = asyncio.Event()
         self._stop_event = asyncio.Event()
@@ -247,10 +249,14 @@ class ReferenceCatalog:
         return result
 
     def retry_failed(self) -> int:
-        count = self.repository.retry_failed_references()
-        if count:
+        counts = self.resume_now()
+        return sum(counts.values())
+
+    def resume_now(self) -> dict[str, int]:
+        counts = self.repository.resume_reference_imports()
+        if sum(counts.values()):
             self._wake_event.set()
-        return count
+        return counts
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -258,11 +264,19 @@ class ReferenceCatalog:
 
     async def run(self) -> None:
         while not self._stop_event.is_set():
+            self._wake_event.clear()
+            recovered = await asyncio.to_thread(
+                self.repository.recover_stale_reference_imports
+            )
+            if recovered:
+                logger.warning(
+                    "Автоматически восстановлено зависших референсов: %s",
+                    recovered,
+                )
             processed = await self.process_next()
             delay = (
                 self.import_delay_seconds if processed else self.idle_interval_seconds
             )
-            self._wake_event.clear()
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -296,9 +310,20 @@ class ReferenceCatalog:
                     height=height,
                     image_sha256=hashlib.sha256(image_bytes).hexdigest(),
                 )
-            tags = await asyncio.to_thread(
-                self._analyze_reference_sync, image_bytes, mime_type
-            )
+            try:
+                tags = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._analyze_reference_sync,
+                        image_bytes,
+                        mime_type,
+                    ),
+                    timeout=self.analysis_timeout_seconds,
+                )
+            except asyncio.TimeoutError as error:
+                raise ReferenceImportError(
+                    "Gemini не ответил вовремя",
+                    retry_after=timedelta(minutes=3),
+                ) from error
             await asyncio.to_thread(
                 self.repository.mark_reference_ready,
                 job.id,
@@ -308,8 +333,10 @@ class ReferenceCatalog:
         except Exception as error:
             retry_after = getattr(error, "retry_after", None)
             if not isinstance(retry_after, timedelta):
-                retry_hours = min(48, 2 ** min(job.attempt_count + 1, 5))
-                retry_after = timedelta(hours=retry_hours)
+                retry_minutes = (2, 5, 15, 30, 60)[
+                    min(job.attempt_count, 4)
+                ]
+                retry_after = timedelta(minutes=retry_minutes)
             status = await asyncio.to_thread(
                 self.repository.mark_reference_import_error,
                 job.id,
@@ -355,7 +382,7 @@ class ReferenceCatalog:
                 try:
                     retry_after = timedelta(seconds=max(60, int(retry_value)))
                 except ValueError:
-                    retry_after = timedelta(hours=6)
+                    retry_after = timedelta(minutes=30)
                 raise ReferenceImportError(
                     "Pinterest временно ограничил частоту запросов",
                     retry_after=retry_after,
@@ -363,7 +390,7 @@ class ReferenceCatalog:
             if response.status in {401, 403}:
                 raise ReferenceImportError(
                     f"Pinterest не разрешил загрузку, код {response.status}",
-                    retry_after=timedelta(hours=12),
+                    retry_after=timedelta(hours=2),
                 )
             if response.status >= 400:
                 raise ReferenceImportError(f"Ссылка недоступна, код {response.status}")
@@ -519,6 +546,7 @@ class ReferenceCatalog:
 
     def status_text(self) -> str:
         stats = self.repository.reference_stats()
+        queue_details = self.repository.reference_queue_details()
         assets = self.repository.list_ready_reference_assets()
         garments: Counter[str] = Counter()
         genders: Counter[str] = Counter()
@@ -537,14 +565,51 @@ class ReferenceCatalog:
         garment_line = ", ".join(
             f"{label}: {garments.get(key, 0)}" for key, label in garment_labels.items()
         )
-        in_progress = sum(
-            stats.get(key, 0) for key in ("pending", "processing", "retry")
-        )
+        pending = stats.get("pending", 0)
+        processing = stats.get("processing", 0)
+        retry = stats.get("retry", 0)
+        waiting_lines = [
+            f"В очереди: {pending}",
+            f"Сейчас обрабатывается: {processing}",
+            f"Ждут повторной попытки: {retry}",
+        ]
+        next_retry = queue_details.get("next_retry_at_utc")
+        if retry and isinstance(next_retry, datetime):
+            seconds = max(0, int((next_retry - datetime.now(UTC)).total_seconds()))
+            if seconds < 60:
+                wait_label = "сейчас"
+            elif seconds < 3600:
+                wait_label = f"через {max(1, seconds // 60)} мин"
+            else:
+                hours, remainder = divmod(seconds, 3600)
+                minutes = remainder // 60
+                wait_label = f"через {hours} ч {minutes} мин"
+            waiting_lines.append(f"Следующая попытка: {wait_label}")
+
+        reason_counts: Counter[str] = Counter()
+        for raw_reason, amount in queue_details.get("reasons", []):
+            reason = raw_reason.casefold()
+            if "pinterest" in reason or "код 403" in reason or "код 429" in reason:
+                label = "временное ограничение Pinterest"
+            elif "quota" in reason or "resource_exhausted" in reason:
+                label = "временный лимит Gemini"
+            elif "не ответил вовремя" in reason or "timeout" in reason:
+                label = "тайм-аут ответа"
+            else:
+                label = "временная ошибка загрузки или анализа"
+            reason_counts[label] += amount
+        if reason_counts:
+            reason_text = ", ".join(
+                f"{label}: {amount}" for label, amount in reason_counts.items()
+            )
+            waiting_lines.append(f"Причина ожидания: {reason_text}")
+
         return (
             "Каталог референсов\n"
             f"Всего ссылок: {stats.get('total', 0)}\n"
             f"Готово: {stats.get('ready', 0)}\n"
-            f"В обработке: {in_progress}\n"
+            + "\n".join(waiting_lines)
+            + "\n"
             f"Не подходят: {stats.get('disabled', 0)}\n"
             f"Ошибки: {stats.get('failed', 0)}\n\n"
             f"По одежде: {garment_line}\n"

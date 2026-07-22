@@ -120,6 +120,7 @@ class Config:
     reference_idle_interval_seconds: float = 300.0
     reference_max_attempts: int = 5
     reference_min_pool_size: int = 20
+    reference_analysis_timeout_seconds: float = 90.0
     reference_user_agent: str = "TaypaReferenceCatalog/4.0"
 
     @classmethod
@@ -191,6 +192,11 @@ class Config:
                 "REFERENCE_MIN_POOL_SIZE",
                 os.getenv("REFERENCE_MIN_POOL_SIZE", "20"),
                 20,
+            ),
+            reference_analysis_timeout_seconds=_positive_float(
+                "REFERENCE_ANALYSIS_TIMEOUT_SECONDS",
+                os.getenv("REFERENCE_ANALYSIS_TIMEOUT_SECONDS", "90"),
+                90.0,
             ),
             reference_user_agent=(
                 os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/4.0").strip()
