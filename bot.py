@@ -8,6 +8,7 @@ from app.config import Config, ConfigError
 from app.copywriter import ImageCopywriter
 from app.handlers import build_router
 from app.health import start_health_server
+from app.mockup_generator import MockupGenerator
 from app.publisher import Publisher
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
@@ -42,6 +43,12 @@ async def main() -> None:
         model=config.gemini_model,
         language=config.copy_language,
     )
+    mockup_generator = MockupGenerator(
+        api_key=config.gemini_api_key,
+        analysis_model=config.gemini_model,
+        image_model=config.gemini_image_model,
+        image_size=config.gemini_image_size,
+    )
     publisher = Publisher(
         bot=bot,
         config=config,
@@ -55,6 +62,7 @@ async def main() -> None:
             config=config,
             repository=repository,
             copywriter=copywriter,
+            mockup_generator=mockup_generator,
             publisher=publisher,
             template_store=template_store,
         )
@@ -70,6 +78,7 @@ async def main() -> None:
                 BotCommand(command="template", description="Шаблон подписи"),
                 BotCommand(command="settemplate", description="Изменить шаблон"),
                 BotCommand(command="presets", description="Готовые пресеты"),
+                BotCommand(command="model", description="Фото на модели"),
                 BotCommand(command="check", description="Проверить настройки"),
                 BotCommand(command="cancel", description="Отменить черновик"),
             ]
