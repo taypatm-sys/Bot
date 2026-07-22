@@ -891,6 +891,37 @@ class PostRepository:
                 (outcome[:30], now, request_token),
             )
 
+    def release_reference_reservation(
+        self,
+        reference_id: int,
+        request_token: str,
+        *,
+        outcome: str = "rejected_preflight",
+    ) -> None:
+        """Release a reference rejected before paid image generation."""
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_usages
+                SET outcome = ?, updated_at_utc = ?
+                WHERE request_token = ?
+                """,
+                (outcome[:30], now, request_token),
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET use_count = CASE WHEN use_count > 0 THEN use_count - 1 ELSE 0 END,
+                    cooldown_until_utc = NULL,
+                    updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (now, reference_id),
+            )
+
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
         if self.get_setting("presets_seeded") == "1":
             return

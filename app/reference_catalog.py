@@ -95,6 +95,23 @@ class ReferenceTags(BaseModel):
     unusable_reason: str = Field(default="", max_length=240)
 
 
+class ReferenceCompatibility(BaseModel):
+    compatible: bool
+    visible_side: Literal["front", "back", "both", "cap-front", "unclear"]
+    camera_angle: Literal[
+        "front",
+        "rear",
+        "three-quarter",
+        "side",
+        "high",
+        "low",
+        "mirror",
+        "unclear",
+    ]
+    print_area_visibility: int = Field(ge=0, le=100)
+    reason: str = Field(min_length=1, max_length=240)
+
+
 class ReferenceImportError(RuntimeError):
     def __init__(self, message: str, *, retry_after: Optional[timedelta] = None):
         super().__init__(message)
@@ -536,9 +553,18 @@ class ReferenceCatalog:
                 allowed_sides = {"front", "both"}
             else:
                 allowed_sides = {"front", "back", "both", "cap-front", "unclear"}
-            if visible_side not in allowed_sides and visible_side != "unclear":
+            if visible_side not in allowed_sides:
                 continue
-            side_penalty = 35 if visible_side == "unclear" and print_side else 0
+
+            camera_angle = str(tags.get("camera_angle", ""))
+            if print_side == "back" and camera_angle not in {"rear", "three-quarter"}:
+                continue
+            if print_side == "front" and camera_angle == "rear":
+                continue
+
+            minimum_visibility = 75 if print_side in {"front", "back"} else 55
+            if visibility < minimum_visibility:
+                continue
 
             framing = str(tags.get("framing", ""))
             if garment_type != "cap" and framing == "full-body":
@@ -565,7 +591,6 @@ class ReferenceCatalog:
             score += 22 * len(mood_set.intersection(tags.get("moods", [])))
             score += framing_score
             score -= crowd_penalty
-            score -= side_penalty
             if season and tags.get("season") in {season, "all-season"}:
                 score += 12
             score -= asset.use_count * 3
@@ -595,6 +620,91 @@ class ReferenceCatalog:
             remaining.pop(index)
             remaining_weights.pop(index)
         return None
+
+    async def validate_reference_for_generation(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        garment_type: GarmentTag,
+        print_side: Literal["front", "back"],
+    ) -> ReferenceCompatibility:
+        return await asyncio.to_thread(
+            self._validate_reference_for_generation_sync,
+            image_bytes,
+            mime_type,
+            garment_type,
+            print_side,
+        )
+
+    def _validate_reference_for_generation_sync(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        garment_type: GarmentTag,
+        print_side: Literal["front", "back"],
+    ) -> ReferenceCompatibility:
+        prompt = (
+            "This is a strict preflight check before a paid clothing image generation. "
+            f"The target product is a {garment_type} with a {print_side} print. "
+            "Judge only whether this photographic reference can safely control pose, "
+            "camera and crop without hiding or contradicting the printed garment panel. "
+            "For a back print, the person's back must be clearly visible from rear or "
+            "rear three-quarter view. For a front print, the front panel must be clearly "
+            "visible. Reject front-facing references for back prints, rear-facing "
+            "references for front prints, unclear body orientation, full-body distant "
+            "shots, crossed arms, hair, bags or props covering the print area, crowds, "
+            "collages, drawings and low-quality images. print_area_visibility is the "
+            "percentage of the required front or back torso panel that remains usable. "
+            "compatible may be true only when visibility is at least 75 and the side is "
+            "unambiguous. Keep reason short and objective."
+        )
+        response = self.client.models.generate_content(
+            model=self.analysis_model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ReferenceCompatibility,
+                temperature=0,
+            ),
+        )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, ReferenceCompatibility):
+            result = parsed
+        elif parsed is not None:
+            result = ReferenceCompatibility.model_validate(parsed)
+        elif response.text:
+            result = ReferenceCompatibility.model_validate_json(response.text)
+        else:
+            raise ReferenceImportError("Gemini не проверил совместимость референса")
+
+        side_ok = (
+            result.visible_side in {"back", "both"}
+            if print_side == "back"
+            else result.visible_side in {"front", "both", "cap-front"}
+        )
+        angle_ok = (
+            result.camera_angle in {"rear", "three-quarter"}
+            if print_side == "back"
+            else result.camera_angle != "rear"
+        )
+        compatible = (
+            result.compatible
+            and side_ok
+            and angle_ok
+            and result.print_area_visibility >= 75
+        )
+        if compatible == result.compatible:
+            return result
+        return result.model_copy(
+            update={
+                "compatible": compatible,
+                "reason": "Сторона, ракурс или видимость зоны принта не подходят",
+            }
+        )
 
     def status_text(self) -> str:
         stats = self.repository.reference_stats()

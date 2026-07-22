@@ -787,24 +787,90 @@ def build_router(
             wearer_label = (
                 "женская модель" if direction.gender == "women" else "мужская модель"
             )
-            usage_token = f"{batch_id}:{index}"
-            reference_asset = reference_catalog.select_reference(
-                garment_type=spec.garment_type,
-                target_gender=direction.gender,
-                moods=spec.moods,
-                request_token=usage_token,
-                print_side=spec.side,
+            usage_token = ""
+            reference_asset = None
+            excluded_reference_ids: list[int] = []
+            preflight_reasons: list[str] = []
+
+            repository.set_setting("last_mockup_reference_passed", "нет")
+            repository.set_setting("last_mockup_reference_count", "0")
+            repository.set_setting("last_mockup_status", "подбор референса")
+            await status_message.edit_text(
+                f"Подбираю и проверяю референс для варианта {index} из "
+                f"{len(directions)}. Платная генерация еще не запущена."
             )
+
+            for reference_attempt in range(1, 7):
+                candidate_token = f"{batch_id}:{index}:r{reference_attempt}"
+                candidate = reference_catalog.select_reference(
+                    garment_type=spec.garment_type,
+                    target_gender=direction.gender,
+                    moods=spec.moods,
+                    request_token=candidate_token,
+                    print_side=spec.side,
+                    exclude_ids=excluded_reference_ids,
+                )
+                if candidate is None:
+                    break
+                try:
+                    compatibility = await asyncio.wait_for(
+                        reference_catalog.validate_reference_for_generation(
+                            image_bytes=candidate.image_bytes,
+                            mime_type=candidate.image_mime_type,
+                            garment_type=spec.garment_type,
+                            print_side=spec.side,
+                        ),
+                        timeout=120.0,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Не удалось проверить референс #%s: %s",
+                        candidate.id,
+                        error,
+                    )
+                    repository.release_reference_reservation(
+                        candidate.id,
+                        candidate_token,
+                        outcome="preflight_error",
+                    )
+                    generation_error = (
+                        "Не удалось безопасно проверить референс. Платная генерация "
+                        "не запускалась. Попробуйте еще раз."
+                    )
+                    break
+
+                if not compatibility.compatible:
+                    excluded_reference_ids.append(candidate.id)
+                    preflight_reasons.append(
+                        f"#{candidate.id}: {compatibility.reason}"
+                    )
+                    repository.release_reference_reservation(
+                        candidate.id,
+                        candidate_token,
+                        outcome="rejected_preflight",
+                    )
+                    logger.info(
+                        "Референс #%s отклонен до генерации: %s",
+                        candidate.id,
+                        compatibility.reason,
+                    )
+                    continue
+
+                reference_asset = candidate
+                usage_token = candidate_token
+                break
+
             if reference_asset is None:
                 repository.set_setting("last_mockup_reference_passed", "нет")
                 repository.set_setting("last_mockup_reference_count", "0")
                 repository.set_setting(
                     "last_mockup_status", "нет подходящего референса"
                 )
-                generation_error = (
-                    "Для этой вещи не найден доступный подходящий референс. "
-                    "Свободная генерация отключена, чтобы бот не придумывал сцену заново."
-                )
+                if generation_error is None:
+                    generation_error = (
+                        "Не найден референс с правильной стороной и открытой зоной "
+                        "принта. Платная генерация не запускалась."
+                    )
                 break
 
             repository.set_setting("last_mockup_reference_id", str(reference_asset.id))

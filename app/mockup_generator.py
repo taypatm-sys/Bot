@@ -457,6 +457,60 @@ def prepare_analysis_image(image_bytes: bytes) -> PreparedAnalysisImage:
     )
 
 
+def prepare_source_print_detail(
+    image_bytes: bytes,
+    spec: Optional[MockupSpec],
+) -> Optional[bytes]:
+    """Create a magnified source detail without requiring a separate PNG."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source).convert("RGB")
+    except (UnidentifiedImageError, OSError):
+        return None
+
+    width, height = image.size
+    if width < 240 or height < 240:
+        return None
+
+    if spec and spec.geometry_mode == "measured" and spec.print_box is not None:
+        box = spec.print_box
+        x0 = box.x / 100.0 * width
+        y0 = box.y / 100.0 * height
+        x1 = (box.x + box.width) / 100.0 * width
+        y1 = (box.y + box.height) / 100.0 * height
+        pad_x = max(width * 0.08, (x1 - x0) * 0.55)
+        pad_y = max(height * 0.08, (y1 - y0) * 0.55)
+        crop_box = (
+            max(0, int(x0 - pad_x)),
+            max(0, int(y0 - pad_y)),
+            min(width, int(x1 + pad_x)),
+            min(height, int(y1 + pad_y)),
+        )
+    elif spec and spec.garment_type == "cap":
+        crop_box = (
+            int(width * 0.12),
+            int(height * 0.04),
+            int(width * 0.88),
+            int(height * 0.72),
+        )
+    else:
+        crop_box = (
+            int(width * 0.10),
+            int(height * 0.03),
+            int(width * 0.90),
+            int(height * 0.82),
+        )
+
+    detail = image.crop(crop_box)
+    if min(detail.size) < 180:
+        return None
+    detail.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    detail.save(output, format="JPEG", quality=96, subsampling=0, optimize=True)
+    return output.getvalue()
+
+
 def build_source_guided_mockup_spec(
     raw: _DetectedMockupSemanticResponse,
     *,
@@ -932,6 +986,7 @@ def build_model_photo_prompt(
     request_token: str,
     *,
     has_separate_print: bool = False,
+    has_source_detail: bool = False,
     has_style_reference: bool = False,
     style_reference_tags: Optional[dict[str, object]] = None,
 ) -> str:
@@ -993,12 +1048,27 @@ def build_model_photo_prompt(
             "redrawing. Image 3 is the manually selected photographic reference and "
             "controls camera distance, crop, pose and background simplicity only."
         )
+    elif has_source_detail and has_style_reference:
+        source_rule = (
+            "Three source images are supplied. Image 1 is the exact complete product "
+            "source for garment color, cut, construction, print scale and placement. "
+            "Image 2 is a magnified crop from the same product and must be used to "
+            "preserve every visible print detail, letter, outline and color without "
+            "redrawing. Image 3 is the photographic reference and controls only pose, "
+            "camera, crop and background simplicity."
+        )
     elif has_separate_print:
         source_rule = (
             "Two source images are supplied. The first image is the placement reference "
             "for garment type, color, cut, side, scale and position. The second image is "
             "the exact high-quality print source. Use the second image for every artwork "
             "pixel and use the first only to preserve placement on the product."
+        )
+    elif has_source_detail:
+        source_rule = (
+            "Two source images are supplied. Image 1 is the exact complete product "
+            "source. Image 2 is a magnified crop from the same product. Use both as "
+            "locked sources for the garment and artwork. Do not redesign the print."
         )
     elif has_style_reference:
         source_rule = (
@@ -1074,8 +1144,10 @@ def build_model_photo_prompt(
         product_physics = (
             "REAL DTF ON CLOTHING:\n"
             "- The artwork is a thin opaque DTF heat-transfer layer bonded to the "
-            "fabric surface. It follows body curvature and folds with tiny local "
-            "wrinkles and small changes in reflection, sharpness and shadow.\n"
+            "fabric surface. It follows body curvature with only subtle natural "
+            "micro-wrinkles and small changes in reflection, sharpness and shadow. "
+            "Do not place a strong crease, fold or seam through the center of the "
+            "printed artwork unless it is truly unavoidable from the pose.\n"
             "- DTF is not screen ink soaked into the weave. Keep its printed colors "
             "recognizable and mostly opaque, with only a very mild satin surface "
             "response. Scene light and white balance affect garment and print together.\n"
@@ -1085,14 +1157,18 @@ def build_model_photo_prompt(
         )
         composition = (
             "- Allow a natural seated, walking, active or standing composition as "
-            "specified. Do not force the wearer into a straight catalog stance.\n"
+            "specified. Do not force the wearer into a straight catalog stance. "
+            "But keep the torso readable and avoid arm positions that create a heavy "
+            "vertical fold across the print.\n"
             "- The complete printed artwork and the garment panel carrying it must "
             "remain inside the central safe area. Legs, hands or unused background "
             "may be cropped naturally. The person does not need to fill a fixed "
             "head-to-mid-thigh template.\n"
             "- For a back print, shoot naturally from behind or a rear three-quarter "
-            "angle. A full face is unnecessary. Move long hair away from the printed "
-            "area without making the hairstyle look staged.\n"
+            "angle. The back torso panel must face the camera and the artwork must stay "
+            "on the back. Never turn a back-print source into a front-facing shirt or "
+            "move the artwork to the chest. A full face is unnecessary. Move long hair "
+            "away from the printed area without making the hairstyle look staged.\n"
         )
 
     if has_style_reference:
@@ -1550,11 +1626,15 @@ class MockupGenerator:
         reference_mime_type: Optional[str] = None,
         reference_tags: Optional[dict[str, object]] = None,
     ) -> GeneratedModelPhoto:
+        source_detail_bytes = None
+        if not print_image_bytes:
+            source_detail_bytes = prepare_source_print_detail(image_bytes, spec)
         prompt = build_model_photo_prompt(
             spec,
             direction,
             request_token,
             has_separate_print=bool(print_image_bytes),
+            has_source_detail=bool(source_detail_bytes),
             has_style_reference=bool(reference_image_bytes),
             style_reference_tags=reference_tags,
         )
@@ -1569,6 +1649,18 @@ class MockupGenerator:
                     types.Part.from_bytes(
                         data=print_image_bytes,
                         mime_type=print_mime_type or "image/png",
+                    ),
+                ]
+            )
+        elif source_detail_bytes:
+            contents.extend(
+                [
+                    "Magnified crop from the exact same product source follows. Use it "
+                    "to preserve the print exactly, including all text, spacing, colors "
+                    "and outlines. It is not a separate design and must not be altered:",
+                    types.Part.from_bytes(
+                        data=source_detail_bytes,
+                        mime_type="image/jpeg",
                     ),
                 ]
             )
