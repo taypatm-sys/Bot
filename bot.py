@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
+from app.analysis_coordinator import AnalysisCoordinator
 from app.config import Config, ConfigError
 from app.copywriter import ImageCopywriter
 from app.handlers import build_router
@@ -39,6 +40,8 @@ async def main() -> None:
     )
     template_store.initialize()
 
+    analysis_coordinator = AnalysisCoordinator()
+
     copywriter = ImageCopywriter(
         api_key=config.gemini_api_key,
         model=config.gemini_model,
@@ -49,6 +52,7 @@ async def main() -> None:
         analysis_model=config.gemini_model,
         image_model=config.gemini_image_model,
         image_size=config.gemini_image_size,
+        analysis_coordinator=analysis_coordinator,
     )
     reference_catalog = ReferenceCatalog(
         repository=repository,
@@ -60,6 +64,7 @@ async def main() -> None:
         min_pool_size=config.reference_min_pool_size,
         analysis_timeout_seconds=config.reference_analysis_timeout_seconds,
         user_agent=config.reference_user_agent,
+        analysis_coordinator=analysis_coordinator,
     )
     added_references, total_seed_references = reference_catalog.seed_file(
         config.reference_sources_path

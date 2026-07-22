@@ -22,7 +22,8 @@ caption_template.txt
 app/
 ```
 
-Внутри `app` должны быть файлы `template_store.py` и `mockup_generator.py`.
+Внутри `app` должны быть файлы `template_store.py`, `mockup_generator.py` и
+`analysis_coordinator.py`.
 
 Не загружайте `.env`, `posts.sqlite3`, токен Telegram, ключ Gemini или строку
 подключения Neon.
@@ -87,7 +88,7 @@ REFERENCE_IDLE_INTERVAL_SECONDS=300
 REFERENCE_MAX_ATTEMPTS=5
 REFERENCE_MIN_POOL_SIZE=20
 REFERENCE_ANALYSIS_TIMEOUT_SECONDS=90
-MOCKUP_ANALYSIS_TIMEOUT_SECONDS=90
+MOCKUP_ANALYSIS_TIMEOUT_SECONDS=150
 ```
 
 Официальная инструкция Render:

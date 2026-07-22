@@ -40,7 +40,7 @@ services:
       - key: REFERENCE_ANALYSIS_TIMEOUT_SECONDS
         value: 90
       - key: MOCKUP_ANALYSIS_TIMEOUT_SECONDS
-        value: 90
+        value: 150
       - key: BUTTON_TEXT
         value: Написать
       - key: COPY_LANGUAGE
