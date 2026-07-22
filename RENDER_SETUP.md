@@ -71,6 +71,7 @@ REFERENCE_IDLE_INTERVAL_SECONDS
 REFERENCE_MAX_ATTEMPTS
 REFERENCE_MIN_POOL_SIZE
 REFERENCE_ANALYSIS_TIMEOUT_SECONDS
+MOCKUP_ANALYSIS_TIMEOUT_SECONDS
 BUTTON_TEXT
 COPY_LANGUAGE
 ```
@@ -86,6 +87,7 @@ REFERENCE_IDLE_INTERVAL_SECONDS=300
 REFERENCE_MAX_ATTEMPTS=5
 REFERENCE_MIN_POOL_SIZE=20
 REFERENCE_ANALYSIS_TIMEOUT_SECONDS=90
+MOCKUP_ANALYSIS_TIMEOUT_SECONDS=90
 ```
 
 Официальная инструкция Render:
@@ -169,6 +171,8 @@ https://bot-y92e.onrender.com/health
 - Готовые пресеты и добавление своих через `/presets`.
 - Каталог референсов в Neon и загрузка новых TXT-списков через `/references`.
 - Создание одной реалистичной фотографии 4:5 из готового макета.
+- Бесплатная карточка анализа до запуска платной генерации.
+- Дополнительный оригинальный PNG принта с проверкой прозрачности.
 - Разные люди, лица, позы и локации в каждой серии.
 - Выбор сгенерированной фотографии для нового поста.
 
