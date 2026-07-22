@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import logging
+import math
 import random
 import secrets
 from contextlib import asynccontextmanager
@@ -67,10 +68,10 @@ class _DetectedMockup(BaseModel):
 
 
 class _ResponseBox(BaseModel):
-    x: float = Field(description="Left edge as percent of the complete image")
-    y: float = Field(description="Top edge as percent of the complete image")
-    width: float = Field(description="Width as percent of the complete image")
-    height: float = Field(description="Height as percent of the complete image")
+    x: float = Field(description="Left edge as a number from 0 to 100")
+    y: float = Field(description="Top edge as a number from 0 to 100")
+    width: float = Field(description="Box width as a number from 0 to 100")
+    height: float = Field(description="Box height as a number from 0 to 100")
 
 
 class _DetectedMockupResponse(BaseModel):
@@ -88,7 +89,9 @@ class _DetectedMockupResponse(BaseModel):
     construction_details: str
     garment_panel_box: _ResponseBox
     print_box: _ResponseBox
-    analysis_confidence: float
+    analysis_confidence: float = Field(
+        description="Measurement confidence from 0 to 100, for example 96"
+    )
 
 
 class _DetectedPrint(BaseModel):
@@ -106,10 +109,10 @@ class MockupSpec(BaseModel):
     shirt_color: str = Field(min_length=1, max_length=80)
     fabric_finish: str = Field(min_length=1, max_length=100)
     fit: str = Field(min_length=1, max_length=80)
-    print_width_percent: int = Field(ge=5, le=100)
-    print_height_percent: int = Field(ge=3, le=100)
-    print_top_offset_percent: int = Field(ge=0, le=80)
-    print_left_offset_percent: int = Field(default=25, ge=0, le=95)
+    print_width_percent: int = Field(ge=1, le=100)
+    print_height_percent: int = Field(ge=1, le=100)
+    print_top_offset_percent: int = Field(ge=0, le=100)
+    print_left_offset_percent: int = Field(default=25, ge=0, le=100)
     print_center_x_percent: int = Field(default=50, ge=0, le=100)
     target_gender: Literal["women", "men", "unisex"]
     target_age_group: TargetAgeGroup = "adult-universal"
@@ -121,6 +124,7 @@ class MockupSpec(BaseModel):
     source_image_height_px: int = Field(default=0, ge=0)
     garment_panel_box: Optional[NormalizedBox] = None
     print_box: Optional[NormalizedBox] = None
+    geometry_validated: bool = False
 
 
 class PrintAssetSpec(BaseModel):
@@ -162,17 +166,91 @@ def _choice(
     return direct if direct in allowed else default
 
 
-def _box_from_response(box: _ResponseBox, *, minimum_size: float) -> NormalizedBox:
-    x = max(0.0, min(99.5, float(box.x)))
-    y = max(0.0, min(99.5, float(box.y)))
-    width = max(minimum_size, float(box.width))
-    height = max(minimum_size, float(box.height))
+MIN_MOCKUP_ANALYSIS_CONFIDENCE = 55
+
+
+class MockupGeometryError(ValueError):
+    """The model response cannot safely be used for paid image generation."""
+
+
+def _finite_number(value: float, field_name: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise MockupGeometryError(f"{field_name} is not a finite number")
+    return number
+
+
+def _normalize_confidence(value: float) -> int:
+    confidence = _finite_number(value, "analysis_confidence")
+    if 0.0 <= confidence <= 1.0:
+        confidence *= 100.0
+    if not 0.0 <= confidence <= 100.0:
+        raise MockupGeometryError("analysis_confidence must be between 0 and 100")
+    return _clamp_int(confidence, 0, 100)
+
+
+def _box_from_response(
+    box: _ResponseBox,
+    *,
+    label: str,
+    image_width: Optional[int],
+    image_height: Optional[int],
+    minimum_width: float,
+    minimum_height: float,
+) -> NormalizedBox:
+    x = _finite_number(box.x, f"{label}.x")
+    y = _finite_number(box.y, f"{label}.y")
+    width = _finite_number(box.width, f"{label}.width")
+    height = _finite_number(box.height, f"{label}.height")
+    values = (x, y, width, height)
+
+    if width <= 0 or height <= 0 or x < 0 or y < 0:
+        raise MockupGeometryError(f"{label} has negative or empty coordinates")
+
+    # Gemini occasionally ignores the requested percentage scale. Normalize a
+    # 0..1 box or a pixel box before validating it. Each box is detected
+    # separately because mixed responses, such as a percentage garment box and
+    # a pixel print box, have been observed in production.
+    if max(values) <= 1.0:
+        x *= 100.0
+        y *= 100.0
+        width *= 100.0
+        height *= 100.0
+    elif max(values) > 105.0:
+        if not image_width or not image_height:
+            raise MockupGeometryError(
+                f"{label} looks like pixels but the image size is unavailable"
+            )
+        if x + width > image_width * 1.03 or y + height > image_height * 1.03:
+            raise MockupGeometryError(f"{label} is outside the source image")
+        x = x / image_width * 100.0
+        width = width / image_width * 100.0
+        y = y / image_height * 100.0
+        height = height / image_height * 100.0
+
+    tolerance = 1.0
+    if x > 100.0 + tolerance or y > 100.0 + tolerance:
+        raise MockupGeometryError(f"{label} starts outside the source image")
+    if x + width > 100.0 + tolerance or y + height > 100.0 + tolerance:
+        raise MockupGeometryError(f"{label} extends outside the source image")
+
+    # Only absorb tiny rounding drift. Large errors must trigger another model
+    # pass instead of being hidden by min/max clipping.
+    x = max(0.0, min(100.0, x))
+    y = max(0.0, min(100.0, y))
     width = min(width, 100.0 - x)
     height = min(height, 100.0 - y)
+    if width < minimum_width or height < minimum_height:
+        raise MockupGeometryError(f"{label} is implausibly small")
     return NormalizedBox(x=x, y=y, width=width, height=height)
 
 
-def normalize_detected_mockup(raw: _DetectedMockupResponse) -> _DetectedMockup:
+def normalize_detected_mockup(
+    raw: _DetectedMockupResponse,
+    *,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+) -> _DetectedMockup:
     garment = _choice(
         raw.garment_type,
         aliases={
@@ -277,9 +355,23 @@ def normalize_detected_mockup(raw: _DetectedMockupResponse) -> _DetectedMockup:
     if not moods:
         moods = ["minimal"]
 
-    garment_box = _box_from_response(raw.garment_panel_box, minimum_size=5.0)
-    print_box = _box_from_response(raw.print_box, minimum_size=0.5)
-    confidence = _clamp_int(float(raw.analysis_confidence), 0, 100)
+    garment_box = _box_from_response(
+        raw.garment_panel_box,
+        label="garment_panel_box",
+        image_width=image_width,
+        image_height=image_height,
+        minimum_width=10.0,
+        minimum_height=10.0,
+    )
+    print_box = _box_from_response(
+        raw.print_box,
+        label="print_box",
+        image_width=image_width,
+        image_height=image_height,
+        minimum_width=0.25,
+        minimum_height=0.25,
+    )
+    confidence = _normalize_confidence(raw.analysis_confidence)
 
     return _DetectedMockup(
         side=side,
@@ -354,14 +446,43 @@ def build_mockup_spec(
 ) -> MockupSpec:
     garment = detected.garment_panel_box
     artwork = detected.print_box
+    tolerance = 2.0
+    garment_right = garment.x + garment.width
+    garment_bottom = garment.y + garment.height
+    artwork_right = artwork.x + artwork.width
+    artwork_bottom = artwork.y + artwork.height
+    artwork_center_x = artwork.x + artwork.width / 2
+    artwork_center_y = artwork.y + artwork.height / 2
+    if not (
+        garment.x - tolerance <= artwork.x
+        and garment.y - tolerance <= artwork.y
+        and artwork_right <= garment_right + tolerance
+        and artwork_bottom <= garment_bottom + tolerance
+        and garment.x <= artwork_center_x <= garment_right
+        and garment.y <= artwork_center_y <= garment_bottom
+    ):
+        raise MockupGeometryError(
+            "print_box does not fit the usable garment panel"
+        )
+
     relative_width = artwork.width / garment.width * 100
     relative_height = artwork.height / garment.height * 100
     relative_left = (artwork.x - garment.x) / garment.width * 100
     relative_top = (artwork.y - garment.y) / garment.height * 100
-    width_percent = _clamp_int(relative_width, 5, 100)
-    height_percent = _clamp_int(relative_height, 3, 100)
+    if not (
+        0 < relative_width <= 103
+        and 0 < relative_height <= 103
+        and -3 <= relative_left <= 100
+        and -3 <= relative_top <= 100
+    ):
+        raise MockupGeometryError("relative print geometry is implausible")
+    if detected.analysis_confidence < MIN_MOCKUP_ANALYSIS_CONFIDENCE:
+        raise MockupGeometryError("analysis confidence is too low")
+
+    width_percent = _clamp_int(relative_width, 1, 100)
+    height_percent = _clamp_int(relative_height, 1, 100)
     left_percent = _clamp_int(relative_left, 0, max(0, 100 - width_percent))
-    top_percent = _clamp_int(relative_top, 0, min(80, max(0, 100 - height_percent)))
+    top_percent = _clamp_int(relative_top, 0, max(0, 100 - height_percent))
     center_percent = _clamp_int(left_percent + width_percent / 2, 0, 100)
     return MockupSpec(
         side=detected.side,
@@ -384,7 +505,33 @@ def build_mockup_spec(
         source_image_height_px=image_height,
         garment_panel_box=garment,
         print_box=artwork,
+        geometry_validated=True,
     )
+
+
+def mockup_spec_validation_issue(spec: MockupSpec) -> Optional[str]:
+    if not spec.geometry_validated:
+        return "анализ создан старой версией без проверки геометрии"
+    if spec.analysis_confidence < MIN_MOCKUP_ANALYSIS_CONFIDENCE:
+        return "слишком низкая уверенность измерения"
+    if spec.print_left_offset_percent + spec.print_width_percent > 100:
+        return "ширина и левый отступ выходят за рабочую часть изделия"
+    if spec.print_top_offset_percent + spec.print_height_percent > 100:
+        return "высота и верхний отступ выходят за рабочую часть изделия"
+    expected_center = (
+        spec.print_left_offset_percent + spec.print_width_percent / 2
+    )
+    if abs(spec.print_center_x_percent - expected_center) > 2:
+        return "центр принта не совпадает с его границами"
+    if spec.garment_panel_box is None or spec.print_box is None:
+        return "не сохранены исходные границы изделия и принта"
+    return None
+
+
+def ensure_mockup_spec_ready(spec: MockupSpec) -> None:
+    issue = mockup_spec_validation_issue(spec)
+    if issue:
+        raise MockupGeometryError(issue)
 
 
 def inspect_print_file(image_bytes: bytes) -> dict[str, int | float | bool]:
@@ -902,6 +1049,10 @@ class MockupGenerator:
                         prepared.mime_type,
                         prepared.width,
                         prepared.height,
+                        geometry_retry=isinstance(
+                            last_error,
+                            MockupGeometryError,
+                        ),
                     )
                 except Exception as error:
                     last_error = error
@@ -932,6 +1083,8 @@ class MockupGenerator:
         mime_type: str,
         image_width: Optional[int] = None,
         image_height: Optional[int] = None,
+        *,
+        geometry_retry: bool = False,
     ) -> MockupSpec:
         if image_width is None or image_height is None:
             try:
@@ -953,8 +1106,19 @@ class MockupGenerator:
             "jacket. Identify front or back, color, fabric finish, fit and construction. "
             "Infer gender, adult age group, moods and theme from the print itself, not "
             "from the blank garment. Keep all text fields short. Confidence describes "
-            "how clearly the garment and full print can be measured."
+            "how clearly the garment and full print can be measured. Return every box "
+            "coordinate as a numeric percentage from 0 to 100, never as pixels and "
+            "never on a 0 to 1 scale. Width and height are dimensions, not right and "
+            "bottom coordinates. The complete print_box must fit inside the usable "
+            "garment_panel_box. Return confidence on a 0 to 100 scale, for example 96, "
+            "not 0.96 or 1. Before responding, verify both boxes against the image."
         )
+        if geometry_retry:
+            prompt += (
+                " A previous measurement failed geometric validation. Re-measure both "
+                "boxes from the image instead of repeating or estimating the prior "
+                "coordinates."
+            )
         response = self.client.models.generate_content(
             model=self.analysis_model,
             contents=[
@@ -975,7 +1139,11 @@ class MockupGenerator:
             raw = _DetectedMockupResponse.model_validate_json(response.text)
         else:
             raise RuntimeError("Gemini не вернул параметры макета")
-        detected = normalize_detected_mockup(raw)
+        detected = normalize_detected_mockup(
+            raw,
+            image_width=image_width,
+            image_height=image_height,
+        )
         return build_mockup_spec(
             detected,
             image_width=image_width,
@@ -1060,6 +1228,13 @@ class MockupGenerator:
     def _friendly_analysis_error(error: Exception) -> MockupAnalysisError:
         code = getattr(error, "code", None)
         message = str(error).upper()
+        if isinstance(error, MockupGeometryError):
+            return MockupAnalysisError(
+                "Gemini увидел вещь, но после трех проверок не смог надежно измерить "
+                "границы принта. Платная генерация заблокирована, чтобы не разместить "
+                "принт неправильно. Макет сохранен. Нажмите «Повторить анализ», "
+                "отправлять файл заново не нужно."
+            )
         if code == 429 or "RESOURCE_EXHAUSTED" in message or "429" in message:
             return MockupAnalysisError(
                 "Gemini временно достиг лимита анализа. Бот уже сделал несколько "

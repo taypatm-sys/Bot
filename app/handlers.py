@@ -36,6 +36,7 @@ from app.mockup_generator import (
     MockupSpec,
     PrintAssetSpec,
     choose_photo_directions,
+    ensure_mockup_spec_ready,
 )
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
@@ -251,7 +252,7 @@ def format_model_analysis(
         f"- отступ слева: {spec.print_left_offset_percent}%\n"
         f"- отступ сверху: {spec.print_top_offset_percent}%\n"
         f"- центр по ширине: {spec.print_center_x_percent}%\n\n"
-        f"Уверенность анализа: {spec.analysis_confidence}%\n"
+        f"Уверенность измерения принта: {spec.analysis_confidence}%\n"
         f"Оригинальный PNG: {png_text}\n\n"
         "Платная генерация еще не запускалась. Проверьте параметры, при желании "
         "добавьте оригинальный PNG и только затем подтвердите создание фото."
@@ -733,6 +734,19 @@ def build_router(
                 return
             await state.update_data(model_mockup_spec=spec.model_dump())
             await save_model_draft(state, message.chat.id)
+
+        try:
+            ensure_mockup_spec_ready(spec)
+        except ValueError as error:
+            logger.warning("Платная генерация заблокирована: %s", error)
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await status_message.edit_text(
+                "Сохраненный анализ нельзя использовать для платной генерации: "
+                f"{error}. Нажмите «Повторить анализ», отправлять макет заново не "
+                "нужно.",
+                reply_markup=model_analysis_retry_keyboard(),
+            )
+            return
 
         batch_id = secrets.token_hex(4)
         used_labels = list(
@@ -1546,6 +1560,20 @@ def build_router(
         if not data.get("model_mockup_spec"):
             await callback.answer("Анализ макета не найден", show_alert=True)
             return
+        try:
+            ensure_mockup_spec_ready(
+                validated_mockup_spec(data["model_mockup_spec"])
+            )
+        except (TypeError, ValueError):
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await callback.answer(
+                "Сначала нужно повторить измерение принта",
+                show_alert=True,
+            )
+            await callback.message.edit_reply_markup(
+                reply_markup=model_analysis_retry_keyboard()
+            )
+            return
         await state.set_state(DraftStates.waiting_model_print)
         await callback.answer()
         await callback.message.answer(
@@ -1619,16 +1647,23 @@ def build_router(
                 "Анализ вещи не найден. Сначала отправьте макет вещи с принтом."
             )
             return
-        spec = validated_mockup_spec(raw_spec).model_copy(
+        source_spec = validated_mockup_spec(raw_spec)
+        try:
+            ensure_mockup_spec_ready(source_spec)
+        except ValueError:
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await waiting.edit_text(
+                "Сохраненное измерение принта недостоверно. Нажмите «Повторить "
+                "анализ», отправлять макет заново не нужно.",
+                reply_markup=model_analysis_retry_keyboard(),
+            )
+            return
+        spec = source_spec.model_copy(
             update={
                 "target_gender": print_asset.target_gender,
                 "target_age_group": print_asset.target_age_group,
                 "moods": print_asset.moods,
                 "print_theme": print_asset.print_theme,
-                "analysis_confidence": max(
-                    validated_mockup_spec(raw_spec).analysis_confidence,
-                    print_asset.analysis_confidence,
-                ),
             }
         )
         await state.update_data(
@@ -1664,6 +1699,20 @@ def build_router(
         data = await restore_model_draft(state, callback.message.chat.id)
         if not data.get("model_source_file_id") or not data.get("model_mockup_spec"):
             await callback.answer("Анализ макета не найден", show_alert=True)
+            return
+        try:
+            spec = validated_mockup_spec(data["model_mockup_spec"])
+            ensure_mockup_spec_ready(spec)
+        except (TypeError, ValueError) as error:
+            logger.warning("Подтверждение недостоверного анализа заблокировано: %s", error)
+            await state.set_state(DraftStates.waiting_model_mockup)
+            await callback.answer(
+                "Этот анализ нужно повторить перед генерацией",
+                show_alert=True,
+            )
+            await callback.message.edit_reply_markup(
+                reply_markup=model_analysis_retry_keyboard()
+            )
             return
         if await state.get_state() == DraftStates.generating_model_photos.state:
             await callback.answer("Фотография уже создается", show_alert=True)
