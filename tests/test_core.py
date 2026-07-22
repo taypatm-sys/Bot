@@ -1,11 +1,20 @@
 import sqlite3
 import tempfile
 import unittest
+import random
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.config import Config, DEFAULT_GEMINI_MODEL, normalize_gemini_model
+from app.config import (
+    Config,
+    ConfigError,
+    DEFAULT_GEMINI_IMAGE_MODEL,
+    DEFAULT_GEMINI_MODEL,
+    normalize_gemini_image_size,
+    normalize_gemini_model,
+)
 from app.copywriter import ProductCopy
 from app.formatting import (
     TemplateError,
@@ -17,6 +26,12 @@ from app.formatting import (
     validate_template,
 )
 from app.health import build_health_app
+from app.mockup_generator import (
+    MockupGenerator,
+    MockupSpec,
+    build_model_photo_prompt,
+    choose_photo_directions,
+)
 from app.scheduling import parse_local_datetime
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
@@ -114,6 +129,82 @@ class CopywriterTests(unittest.TestCase):
         self.assertEqual(product.hashtags, "#худи #karakum_spirit")
 
 
+class MockupGeneratorTests(unittest.TestCase):
+    def test_batch_uses_distinct_people_and_scenes(self) -> None:
+        directions = choose_photo_directions(4, random.Random(42))
+        self.assertEqual(len(directions), 4)
+        self.assertEqual(len({item.label for item in directions}), 4)
+        self.assertEqual(len({item.person for item in directions}), 4)
+        self.assertEqual(len({item.seed for item in directions}), 4)
+
+    def test_prompt_locks_print_scale_and_safe_area(self) -> None:
+        direction = choose_photo_directions(1, random.Random(7))[0]
+        spec = MockupSpec(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="washed dark gray",
+            fabric_finish="acid washed cotton",
+            fit="relaxed",
+            print_width_percent=48,
+            print_height_percent=27,
+            print_top_from_collar_percent=18,
+        )
+        prompt = build_model_photo_prompt(spec, direction, "batch123")
+        self.assertIn("front", prompt)
+        self.assertIn("48%", prompt)
+        self.assertIn("27%", prompt)
+        self.assertIn("18%", prompt)
+        self.assertIn("Do not redraw", prompt)
+        self.assertIn("Vertical 4:5", prompt)
+        self.assertIn("central 80%", prompt)
+        self.assertIn("different, fictional, non-celebrity adult", prompt)
+
+    def test_billing_error_is_explained(self) -> None:
+        error = MockupGenerator._friendly_error(
+            RuntimeError("FAILED_PRECONDITION: billing is required")
+        )
+        self.assertIn("платный тариф", error.user_message)
+
+    def test_generation_requests_4_by_5_image(self) -> None:
+        class FakeModels:
+            kwargs = None
+
+            def generate_content(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            inline_data=SimpleNamespace(
+                                data=b"jpeg-data",
+                                mime_type="image/jpeg",
+                            )
+                        )
+                    ]
+                )
+
+        generator = object.__new__(MockupGenerator)
+        generator.client = SimpleNamespace(models=FakeModels())
+        generator.image_model = "gemini-3.1-flash-image"
+        generator.image_size = "1K"
+        generator.aspect_ratio = "4:5"
+        direction = choose_photo_directions(1, random.Random(11))[0]
+
+        result = generator._generate_variant_sync(
+            b"source-image",
+            "image/jpeg",
+            None,
+            direction,
+            "batch",
+        )
+
+        config = generator.client.models.kwargs["config"]
+        dumped = config.model_dump(by_alias=True, exclude_none=True)
+        self.assertEqual(result.data, b"jpeg-data")
+        self.assertEqual(dumped["imageConfig"]["aspectRatio"], "4:5")
+        self.assertEqual(dumped["imageConfig"]["imageSize"], "1K")
+        self.assertEqual(dumped["responseModalities"], ["IMAGE"])
+
+
 class ConfigTests(unittest.TestCase):
     def test_old_gemini_model_is_upgraded(self) -> None:
         self.assertEqual(
@@ -126,6 +217,14 @@ class ConfigTests(unittest.TestCase):
             normalize_gemini_model("gemini-3.5-flash"),
             "gemini-3.5-flash",
         )
+
+    def test_default_image_model_and_valid_size(self) -> None:
+        self.assertEqual(DEFAULT_GEMINI_IMAGE_MODEL, "gemini-3.1-flash-image")
+        self.assertEqual(normalize_gemini_image_size(" 2k "), "2K")
+
+    def test_invalid_image_size_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            normalize_gemini_image_size("HD")
 
     def test_persistent_template_is_seeded_from_bundled_template(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
