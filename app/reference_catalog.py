@@ -506,6 +506,7 @@ class ReferenceCatalog:
         moods: Sequence[MoodTag],
         request_token: Optional[str] = None,
         season: Optional[Literal["warm", "cold", "all-season"]] = None,
+        print_side: Optional[Literal["front", "back"]] = None,
         exclude_ids: Sequence[int] = (),
         rng: Optional[random.Random] = None,
     ) -> Optional[ReferenceAsset]:
@@ -525,9 +526,46 @@ class ReferenceCatalog:
             visibility = int(tags.get("print_area_visibility", 0) or 0)
             if visibility < 55:
                 continue
+
+            visible_side = str(tags.get("print_side_visible", "unclear"))
+            if garment_type == "cap":
+                allowed_sides = {"cap-front", "front", "both"}
+            elif print_side == "back":
+                allowed_sides = {"back", "both"}
+            elif print_side == "front":
+                allowed_sides = {"front", "both"}
+            else:
+                allowed_sides = {"front", "back", "both", "cap-front", "unclear"}
+            if visible_side not in allowed_sides and visible_side != "unclear":
+                continue
+            side_penalty = 35 if visible_side == "unclear" and print_side else 0
+
+            framing = str(tags.get("framing", ""))
+            if garment_type != "cap" and framing == "full-body":
+                continue
+            framing_score = {
+                "waist-up": 45,
+                "close-up": 38,
+                "three-quarter": 28,
+                "detail": 18,
+                "full-body": -45,
+            }.get(framing, 0)
+            notes = " ".join(
+                [
+                    str(tags.get("setting", "")),
+                    str(tags.get("composition_notes", "")),
+                ]
+            ).casefold()
+            crowd_penalty = 0
+            if any(word in notes for word in ("crowd", "busy", "group", "many people")):
+                crowd_penalty = 60
+
             score = 100.0 + visibility * 0.35
             score += 35 if gender == target_gender else 10
             score += 22 * len(mood_set.intersection(tags.get("moods", [])))
+            score += framing_score
+            score -= crowd_penalty
+            score -= side_penalty
             if season and tags.get("season") in {season, "all-season"}:
                 score += 12
             score -= asset.use_count * 3

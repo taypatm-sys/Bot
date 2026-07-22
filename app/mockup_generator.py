@@ -837,6 +837,8 @@ def build_model_photo_prompt(
     request_token: str,
     *,
     has_separate_print: bool = False,
+    has_style_reference: bool = False,
+    style_reference_tags: Optional[dict[str, object]] = None,
 ) -> str:
     if spec is None:
         measurements = (
@@ -876,17 +878,66 @@ def build_model_photo_prompt(
                 f"The artwork mood tags are {', '.join(spec.moods)}."
             )
 
-    source_rule = (
-        "Two source images are supplied. The first image is the placement reference "
-        "for garment type, color, cut, side, scale and position. The second image is "
-        "the exact high-quality print source. Use the second image for every artwork "
-        "pixel and use the first only to preserve placement on the product."
-        if has_separate_print
-        else (
+    if has_separate_print and has_style_reference:
+        source_rule = (
+            "Three source images are supplied. Image 1 is the exact product source "
+            "for garment color, wash, cut, construction, print scale and placement. "
+            "Image 2 is the exact isolated print source and must be preserved without "
+            "redrawing. Image 3 is the manually selected photographic reference and "
+            "controls camera distance, crop, pose and background simplicity only."
+        )
+    elif has_separate_print:
+        source_rule = (
+            "Two source images are supplied. The first image is the placement reference "
+            "for garment type, color, cut, side, scale and position. The second image is "
+            "the exact high-quality print source. Use the second image for every artwork "
+            "pixel and use the first only to preserve placement on the product."
+        )
+    elif has_style_reference:
+        source_rule = (
+            "Two source images are supplied. Image 1 is the exact product source and "
+            "the only source for garment color, wash, cut, construction and artwork. "
+            "Image 2 is the manually selected photographic reference and controls "
+            "camera distance, crop, pose and background simplicity only."
+        )
+    else:
+        source_rule = (
             "One source image is supplied. Use the artwork visible on that product as "
             "the locked print source."
         )
-    )
+
+    reference_tags = style_reference_tags or {}
+    reference_notes = str(reference_tags.get("composition_notes", "")).strip()
+    reference_framing = str(reference_tags.get("framing", "")).strip()
+    reference_angle = str(reference_tags.get("camera_angle", "")).strip()
+    reference_setting = str(reference_tags.get("setting", "")).strip()
+    if has_style_reference:
+        reference_direction = (
+            "MANUALLY SELECTED PHOTO REFERENCE - REQUIRED:\n"
+            "- The final source image is not optional. Closely match its camera "
+            "distance, crop, body orientation, pose, lens feel, background density "
+            "and overall photographic composition. Do not invent a different street, "
+            "studio, room, activity or camera position.\n"
+            "- The product image remains the absolute source of truth for the garment. "
+            "Never copy clothing, colors, logos or artwork from the photo reference.\n"
+            "- No crowd, no group of pedestrians and no busy public background. Do not "
+            "add extra people. Keep the scene visually quiet and product-focused.\n"
+            "- For clothing, the wearer must be close enough that the garment and print "
+            "are immediately inspectable. Prefer waist-up or three-quarter framing. The "
+            "wearer should occupy about 75 to 90 percent of the image height.\n"
+            "- Preserve the exact source garment color and wash. Do not reinterpret "
+            "charcoal, washed gray, beige or any other color through creative grading.\n"
+            f"- Catalog tags: framing={reference_framing or 'use the image'}, "
+            f"angle={reference_angle or 'use the image'}, "
+            f"setting={reference_setting or 'use the image'}.\n"
+            + (f"- Catalog composition note: {reference_notes}.\n" if reference_notes else "")
+        )
+    else:
+        reference_direction = (
+            "NO MANUAL PHOTO REFERENCE WAS SUPPLIED:\n"
+            "- Keep the setting simple, close and product-focused. Never use a crowd "
+            "or a busy public scene.\n"
+        )
 
     if is_cap:
         product_physics = (
@@ -937,13 +988,27 @@ def build_model_photo_prompt(
             "area without making the hairstyle look staged.\n"
         )
 
+    if has_style_reference:
+        direction_details = (
+            "- The manual photo reference overrides the generated location, action, "
+            "camera and framing suggestions. Follow the visible reference instead.\n"
+        )
+    else:
+        direction_details = (
+            f"- Location: {direction.setting}.\n"
+            f"- Action, not pose: {direction.pose}.\n"
+            f"- Camera: {direction.camera}.\n"
+            f"- Framing: {direction.framing}.\n"
+            f"- Light: {direction.light}.\n"
+        )
+
     return (
         "Create one believable everyday smartphone photograph for a real clothing "
-        "shop's social page. Use the visual language of an ordinary moment captured "
-        "by a friend, not a fashion campaign, studio mockup, stock photo or polished "
-        "AI portrait. The supplied image is the only product reference. Ignore its "
-        "presentation background, mockup shadows, watermarks and writing outside the "
-        "physical product. Do not copy its original pose or scene.\n\n"
+        "shop's social page. It must look like a real product photograph, not a stock "
+        "photo, fashion campaign, studio mockup or polished AI portrait. The product "
+        "source is authoritative. Ignore only its presentation background, mockup "
+        "shadows, watermarks and writing outside the physical product. Do not copy the "
+        "product mockup's original presentation scene.\n\n"
         "LOCKED PRODUCT ARTWORK:\n"
         f"0. {source_rule}\n"
         "1. Transfer the complete print as locked source artwork. Preserve every "
@@ -962,13 +1027,10 @@ def build_model_photo_prompt(
         "real wearer is a different fictional non-celebrity adult.\n"
         f"5. {measurements}\n\n"
         f"{product_physics}\n"
-        "REFERENCE-BASED REAL PHOTO DIRECTION:\n"
+        f"{reference_direction}\n"
+        "REAL PHOTO DIRECTION:\n"
         f"- Wearer: {direction.person}.\n"
-        f"- Location: {direction.setting}.\n"
-        f"- Action, not pose: {direction.pose}.\n"
-        f"- Camera: {direction.camera}.\n"
-        f"- Framing: {direction.framing}.\n"
-        f"- Light: {direction.light}.\n"
+        f"{direction_details}"
         "- The person is genuinely occupied with the action. Do not make them stop, "
         "square their shoulders or present the product to camera. A hand, bag, cup or "
         "prop may overlap a small non-printed area naturally, but never hide the print.\n"
@@ -1284,6 +1346,9 @@ class MockupGenerator:
         request_token: str,
         print_image_bytes: Optional[bytes] = None,
         print_mime_type: Optional[str] = None,
+        reference_image_bytes: Optional[bytes] = None,
+        reference_mime_type: Optional[str] = None,
+        reference_tags: Optional[dict[str, object]] = None,
     ) -> GeneratedModelPhoto:
         try:
             return await asyncio.to_thread(
@@ -1295,6 +1360,9 @@ class MockupGenerator:
                 request_token,
                 print_image_bytes,
                 print_mime_type,
+                reference_image_bytes,
+                reference_mime_type,
+                reference_tags,
             )
         except MockupGenerationError:
             raise
@@ -1311,12 +1379,17 @@ class MockupGenerator:
         request_token: str,
         print_image_bytes: Optional[bytes] = None,
         print_mime_type: Optional[str] = None,
+        reference_image_bytes: Optional[bytes] = None,
+        reference_mime_type: Optional[str] = None,
+        reference_tags: Optional[dict[str, object]] = None,
     ) -> GeneratedModelPhoto:
         prompt = build_model_photo_prompt(
             spec,
             direction,
             request_token,
             has_separate_print=bool(print_image_bytes),
+            has_style_reference=bool(reference_image_bytes),
+            style_reference_tags=reference_tags,
         )
         contents: list[object] = [
             prompt,
@@ -1329,6 +1402,17 @@ class MockupGenerator:
                     types.Part.from_bytes(
                         data=print_image_bytes,
                         mime_type=print_mime_type or "image/png",
+                    ),
+                ]
+            )
+        if reference_image_bytes:
+            contents.extend(
+                [
+                    "Manually selected photographic composition reference follows. "
+                    "Use it for pose, crop, camera distance and scene simplicity only:",
+                    types.Part.from_bytes(
+                        data=reference_image_bytes,
+                        mime_type=reference_mime_type or "image/jpeg",
                     ),
                 ]
             )

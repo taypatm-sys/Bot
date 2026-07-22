@@ -771,9 +771,33 @@ def build_router(
             wearer_label = (
                 "женская модель" if direction.gender == "women" else "мужская модель"
             )
+            usage_token = f"{batch_id}:{index}"
+            reference_asset = reference_catalog.select_reference(
+                garment_type=spec.garment_type,
+                target_gender=direction.gender,
+                moods=spec.moods,
+                request_token=usage_token,
+                print_side=spec.side,
+            )
+            if reference_asset is None:
+                repository.set_setting("last_mockup_reference_passed", "нет")
+                repository.set_setting("last_mockup_reference_count", "0")
+                repository.set_setting(
+                    "last_mockup_status", "нет подходящего референса"
+                )
+                generation_error = (
+                    "Для этой вещи не найден доступный подходящий референс. "
+                    "Свободная генерация отключена, чтобы бот не придумывал сцену заново."
+                )
+                break
+
+            repository.set_setting("last_mockup_reference_id", str(reference_asset.id))
+            repository.set_setting("last_mockup_reference_passed", "да")
+            repository.set_setting("last_mockup_reference_count", "1")
+            repository.set_setting("last_mockup_status", "генерация")
             await status_message.edit_text(
                 f"Создаю вариант {index} из {len(directions)}. "
-                f"Выбрана {wearer_label}. Лицо, поза и место будут новыми..."
+                f"Референс #{reference_asset.id} передан Gemini."
             )
             try:
                 generated_photo = await mockup_generator.generate_variant(
@@ -781,13 +805,20 @@ def build_router(
                     mime_type=source_mime_type,
                     spec=spec,
                     direction=direction,
-                    request_token=batch_id,
+                    request_token=usage_token,
                     print_image_bytes=print_bytes,
                     print_mime_type=print_mime_type,
+                    reference_image_bytes=reference_asset.image_bytes,
+                    reference_mime_type=reference_asset.image_mime_type,
+                    reference_tags=reference_asset.tags,
                 )
             except MockupGenerationError as error:
+                repository.finish_reference_usage(usage_token, outcome="failed")
+                repository.set_setting("last_mockup_status", "ошибка генерации")
                 generation_error = error.user_message
                 break
+            repository.finish_reference_usage(usage_token, outcome="completed")
+            repository.set_setting("last_mockup_status", "готово")
 
             sent = await message.answer_photo(
                 photo=BufferedInputFile(
@@ -798,7 +829,7 @@ def build_router(
                 ),
                 caption=(
                     f"Вариант {index} из {len(directions)}\n"
-                    f"{direction.label}\n"
+                    f"Референс #{reference_asset.id}\n"
                     f"{wearer_label.capitalize()}\n"
                     "Формат 4:5"
                 ),
@@ -878,6 +909,23 @@ def build_router(
             bot_info = await bot.get_me()
             chat = await bot.get_chat(config.channel_id)
             member = await bot.get_chat_member(config.channel_id, bot_info.id)
+            ready_references = repository.reference_stats().get("ready", 0)
+            last_reference_id = (
+                repository.get_setting("last_mockup_reference_id") or "нет"
+            )
+            last_reference_label = (
+                f"#{last_reference_id}" if last_reference_id != "нет" else "нет"
+            )
+            last_reference_passed = (
+                repository.get_setting("last_mockup_reference_passed")
+                or "еще не запускалось"
+            )
+            last_reference_count = (
+                repository.get_setting("last_mockup_reference_count") or "0"
+            )
+            last_mockup_status = (
+                repository.get_setting("last_mockup_status") or "еще не запускалось"
+            )
             await message.answer(
                 "Настройки работают.\n"
                 f"Бот: @{bot_info.username}\n"
@@ -886,8 +934,12 @@ def build_router(
                 f"База: {repository.backend_name}\n"
                 f"Фото на модели: {config.gemini_image_model}, "
                 f"{config.gemini_image_size}, 4:5\n"
-                f"Референсов готово: "
-                f"{repository.reference_stats().get('ready', 0)}"
+                "Режим: обязательный референс\n"
+                f"Референсов готово: {ready_references}\n"
+                f"В последней генерации: {last_reference_count}\n"
+                f"Последний референс: {last_reference_label}\n"
+                f"Передан Gemini: {last_reference_passed}\n"
+                f"Статус генерации: {last_mockup_status}"
             )
         except Exception as error:
             logger.exception("Проверка настроек не пройдена")
