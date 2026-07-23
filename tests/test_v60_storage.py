@@ -106,3 +106,23 @@ def test_order_message_uses_correct_accusative() -> None:
     url = contact_link("taypa", 'Футболка "Degmäň"')
     message = parse_qs(urlparse(url).query)["text"][0]
     assert message == "Здравствуйте! Хочу заказать футболку «Degmäň»."
+
+
+def test_postgres_lifecycle_backfill_parameterizes_unicode_like_pattern() -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.query = ""
+            self.params = ()
+
+        def execute(self, query, params=()):
+            self.query = query
+            self.params = params
+            return self
+
+    repository = PostRepository("postgresql://example.invalid/test")
+    connection = FakeConnection()
+    repository._backfill_reference_lifecycle(connection)
+
+    assert "simple_reason LIKE %s" in connection.query
+    assert "%чистая%" not in connection.query
+    assert connection.params == ("%чистая%",)
