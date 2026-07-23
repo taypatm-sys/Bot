@@ -864,17 +864,46 @@ def build_router(
                     print_side=spec.side,
                     exclude_ids=excluded_reference_ids,
                     preferred_source_name=dynamic_source_name,
+                    simple_only=(requested_generation_mode == "local"),
                 )
+                if candidate is None and requested_generation_mode == "local":
+                    await status_message.edit_text(
+                        "Подготавливаю референсы для простого режима из вашей базы ссылок. "
+                        "Платная генерация не запускается."
+                    )
+                    for _ in range(6):
+                        if not await reference_catalog.process_next_simple_reference():
+                            break
+                    candidate = reference_catalog.select_reference(
+                        garment_type=spec.garment_type,
+                        target_gender=direction.gender,
+                        moods=spec.moods,
+                        request_token=candidate_token,
+                        print_side=spec.side,
+                        exclude_ids=excluded_reference_ids,
+                        preferred_source_name=dynamic_source_name,
+                        simple_only=True,
+                    )
                 if candidate is None:
                     break
+                candidate_image_bytes = (
+                    candidate.simple_image_bytes
+                    if requested_generation_mode == "local" and candidate.simple_image_bytes
+                    else candidate.image_bytes
+                )
+                candidate_mime_type = (
+                    candidate.simple_image_mime_type
+                    if requested_generation_mode == "local" and candidate.simple_image_mime_type
+                    else candidate.image_mime_type
+                )
                 try:
                     repository.set_setting(
                         "last_mockup_preflight_mode", "Gemini vision"
                     )
                     compatibility = await asyncio.wait_for(
                         reference_catalog.validate_reference_for_generation(
-                            image_bytes=candidate.image_bytes,
-                            mime_type=candidate.image_mime_type,
+                            image_bytes=candidate_image_bytes,
+                            mime_type=candidate_mime_type,
                             garment_type=spec.garment_type,
                             print_side=spec.side,
                             target_shirt_color=spec.shirt_color,
@@ -965,10 +994,18 @@ def build_router(
                 )
                 if generation_error is None:
                     if requested_generation_mode == "local":
-                        generation_error = (
-                            "Не найден референс, подходящий для простого режима. "
-                            "Попробуйте режим «Сложный - Gemini» или другой макет."
-                        )
+                        simple_stats = repository.simple_reference_stats()
+                        preparing = simple_stats.get("pending", 0) + simple_stats.get("processing", 0)
+                        if preparing:
+                            generation_error = (
+                                "База простых референсов еще готовится. "
+                                f"В очереди: {preparing}. Попробуйте снова через несколько минут."
+                            )
+                        else:
+                            generation_error = (
+                                "Не найден подготовленный референс для простого режима. "
+                                "Добавьте новые ссылки в разделе «Референсы» или выберите «Сложный - Gemini»."
+                            )
                     else:
                         generation_error = (
                             "Не найден референс с правильной стороной и открытой зоной "
@@ -1042,6 +1079,35 @@ def build_router(
                 **reference_asset.tags,
                 "preflight": reference_compatibility.model_dump(),
             }
+            reference_bytes_for_generation = reference_asset.image_bytes
+            reference_mime_for_generation = reference_asset.image_mime_type
+            if generation_decision.provider == "local" and reference_asset.simple_ready:
+                reference_bytes_for_generation = (
+                    reference_asset.simple_image_bytes or reference_asset.image_bytes
+                )
+                reference_mime_for_generation = (
+                    reference_asset.simple_image_mime_type
+                    or reference_asset.image_mime_type
+                )
+                preflight_tags.update(
+                    {
+                        "garment_is_plain": True,
+                        "existing_print_coverage_percent": 0,
+                        "simple_prepared": True,
+                    }
+                )
+                clean_preflight = reference_compatibility.model_copy(
+                    update={
+                        "existing_print_present": False,
+                        "existing_print_box": None,
+                        "existing_print_quad": [],
+                        "existing_print_coverage_percent": 0,
+                        "existing_print_coverable": False,
+                        "fabric_reconstruction_safe": True,
+                        "local_composite_safe": True,
+                    }
+                )
+                preflight_tags["preflight"] = clean_preflight.model_dump()
             generator_kwargs = dict(
                 image_bytes=source_bytes,
                 mime_type=source_mime_type,
@@ -1050,8 +1116,8 @@ def build_router(
                 request_token=usage_token,
                 print_image_bytes=print_bytes,
                 print_mime_type=print_mime_type,
-                reference_image_bytes=reference_asset.image_bytes,
-                reference_mime_type=reference_asset.image_mime_type,
+                reference_image_bytes=reference_bytes_for_generation,
+                reference_mime_type=reference_mime_for_generation,
                 reference_tags=preflight_tags,
             )
             try:
@@ -1414,7 +1480,9 @@ def build_router(
             f"Принято ссылок: {total}\n"
             f"Новых: {added}\n"
             f"Уже были в базе: {duplicates}\n\n"
-            "Новые фотографии будут загружены и размечены по очереди в фоне.",
+            "Новые фотографии будут загружены, размечены и отдельно подготовлены "
+            "для простого режима. Если на футболке есть небольшой чужой принт, бот "
+            "попробует удалить его заранее и сохранить чистую версию.",
             reply_markup=main_keyboard(),
         )
 

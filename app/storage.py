@@ -96,6 +96,7 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
         tags = {}
     if not isinstance(tags, dict):
         tags = {}
+    row_keys = set(row.keys()) if hasattr(row, "keys") else set(row)
     return ReferenceAsset(
         id=int(row["id"]),
         source_url=str(row["source_url"]),
@@ -110,6 +111,24 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
         last_used_at_utc=_optional_datetime(row["last_used_at_utc"]),
         cooldown_until_utc=_optional_datetime(row["cooldown_until_utc"]),
         source_name=str(row["source_name"] or ""),
+        simple_image_bytes=(
+            bytes(row["simple_image_bytes"])
+            if "simple_image_bytes" in row_keys and row["simple_image_bytes"] is not None
+            else None
+        ),
+        simple_image_mime_type=(
+            str(row["simple_image_mime_type"])
+            if "simple_image_mime_type" in row_keys and row["simple_image_mime_type"]
+            else None
+        ),
+        simple_thumbnail_bytes=(
+            bytes(row["simple_thumbnail_bytes"])
+            if "simple_thumbnail_bytes" in row_keys and row["simple_thumbnail_bytes"] is not None
+            else None
+        ),
+        simple_ready=bool(row["simple_ready"] if "simple_ready" in row_keys else 0),
+        simple_status=str((row["simple_status"] if "simple_status" in row_keys else None) or "pending"),
+        simple_reason=str((row["simple_reason"] if "simple_reason" in row_keys else None) or ""),
     )
 
 
@@ -224,6 +243,12 @@ class PostRepository:
                     image_bytes {binary_column},
                     image_mime_type TEXT,
                     thumbnail_bytes {binary_column},
+                    simple_image_bytes {binary_column},
+                    simple_image_mime_type TEXT,
+                    simple_thumbnail_bytes {binary_column},
+                    simple_ready INTEGER NOT NULL DEFAULT 0,
+                    simple_status TEXT NOT NULL DEFAULT 'pending',
+                    simple_reason TEXT NOT NULL DEFAULT '',
                     width INTEGER,
                     height INTEGER,
                     image_sha256 TEXT,
@@ -289,6 +314,7 @@ class PostRepository:
                 (_iso(datetime.now(UTC)),),
             )
             self._migrate_post_columns(connection)
+            self._migrate_reference_columns(connection, binary_column)
             self._execute(
                 connection,
                 """
@@ -346,6 +372,43 @@ class PostRepository:
                 self._execute(
                     connection,
                     f"ALTER TABLE scheduled_posts ADD COLUMN {name} {definition}",
+                )
+
+    def _migrate_reference_columns(self, connection: Any, binary_column: str) -> None:
+        definitions = {
+            "simple_image_bytes": binary_column,
+            "simple_image_mime_type": "TEXT",
+            "simple_thumbnail_bytes": binary_column,
+            "simple_ready": "INTEGER NOT NULL DEFAULT 0",
+            "simple_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "simple_reason": "TEXT NOT NULL DEFAULT ''",
+        }
+        if self.database_url:
+            for name, definition in definitions.items():
+                self._execute(
+                    connection,
+                    f"ALTER TABLE reference_assets ADD COLUMN IF NOT EXISTS {name} {definition}",
+                )
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'pending'
+                WHERE status = 'ready'
+                  AND COALESCE(simple_status, '') = ''
+                """,
+            )
+            return
+
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(reference_assets)")
+        }
+        for name, definition in definitions.items():
+            if name not in columns:
+                self._execute(
+                    connection,
+                    f"ALTER TABLE reference_assets ADD COLUMN {name} {definition}",
                 )
 
     def close(self) -> None:
@@ -635,6 +698,8 @@ class PostRepository:
                 """
                 UPDATE reference_assets
                 SET tags_json = ?, status = ?, last_error = ?,
+                    simple_status = CASE WHEN ? THEN 'pending' ELSE 'skipped' END,
+                    simple_ready = 0, simple_reason = '',
                     next_retry_at_utc = NULL, updated_at_utc = ?
                 WHERE id = ?
                 """,
@@ -642,6 +707,7 @@ class PostRepository:
                     json.dumps(dict(tags), ensure_ascii=False, separators=(",", ":")),
                     status,
                     error,
+                    usable,
                     now,
                     reference_id,
                 ),
@@ -682,6 +748,101 @@ class PostRepository:
                 ),
             )
         return status
+
+    def claim_simple_reference_preparation(self) -> Optional[ReferenceAsset]:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM reference_assets
+                WHERE status = 'ready'
+                  AND image_bytes IS NOT NULL
+                  AND simple_status = 'pending'
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+            ).fetchone()
+            if not row:
+                return None
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'processing', updated_at_utc = ?
+                WHERE id = ? AND simple_status = 'pending'
+                """,
+                (now, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return _row_to_reference_asset(row)
+
+    def store_simple_reference_variant(
+        self,
+        reference_id: int,
+        *,
+        image_bytes: Optional[bytes],
+        image_mime_type: Optional[str],
+        thumbnail_bytes: Optional[bytes],
+        ready: bool,
+        reason: str = "",
+    ) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_image_bytes = ?, simple_image_mime_type = ?,
+                    simple_thumbnail_bytes = ?, simple_ready = ?,
+                    simple_status = ?, simple_reason = ?, updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (
+                    image_bytes,
+                    image_mime_type,
+                    thumbnail_bytes,
+                    1 if ready else 0,
+                    "ready" if ready else "skipped",
+                    reason[:1000],
+                    now,
+                    reference_id,
+                ),
+            )
+
+    def recover_simple_reference_preparations(self) -> int:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'pending',
+                    simple_reason = 'Подготовка была прервана перезапуском',
+                    updated_at_utc = ?
+                WHERE status = 'ready' AND simple_status = 'processing'
+                """,
+                (now,),
+            )
+        return int(cursor.rowcount or 0)
+
+    def simple_reference_stats(self) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT simple_status, COUNT(*) AS amount
+                FROM reference_assets
+                WHERE status = 'ready'
+                GROUP BY simple_status
+                """,
+            ).fetchall()
+        result = {"ready": 0, "pending": 0, "processing": 0, "skipped": 0}
+        for row in rows:
+            key = str(row["simple_status"] or "pending")
+            result[key] = int(row["amount"] or 0)
+        return result
 
     def retry_failed_references(self) -> int:
         now = _iso(datetime.now(UTC))

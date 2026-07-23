@@ -57,3 +57,9 @@ class ReferenceAsset:
     last_used_at_utc: Optional[datetime]
     cooldown_until_utc: Optional[datetime]
     source_name: str = ""
+    simple_image_bytes: Optional[bytes] = None
+    simple_image_mime_type: Optional[str] = None
+    simple_thumbnail_bytes: Optional[bytes] = None
+    simple_ready: bool = False
+    simple_status: str = "pending"
+    simple_reason: str = ""

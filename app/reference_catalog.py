@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.analysis_coordinator import AnalysisCoordinator
 from app.models import ReferenceAsset
+from app.local_mockup_generator import LocalCompositeNeedsGemini, LocalMockupGenerator
 from app.storage import PostRepository
 
 
@@ -184,6 +185,24 @@ class ReferenceCompatibility(BaseModel):
     reason: str = Field(min_length=1, max_length=240)
 
 
+class SimpleReferencePreparation(BaseModel):
+    suitable: bool
+    visible_side: Literal["front", "back", "both", "unclear"]
+    camera_angle: Literal[
+        "front", "rear", "three-quarter", "side", "high", "low", "mirror", "unclear"
+    ]
+    print_area_visibility: int = Field(ge=0, le=100)
+    target_print_box: Optional[PlacementBox] = None
+    target_print_quad: list[PlacementPoint] = Field(default_factory=list, max_length=4)
+    existing_print_present: bool = False
+    existing_print_box: Optional[PlacementBox] = None
+    existing_print_quad: list[PlacementPoint] = Field(default_factory=list, max_length=4)
+    existing_print_coverage_percent: int = Field(default=0, ge=0, le=100)
+    existing_print_coverable: bool = False
+    fabric_reconstruction_safe: bool = False
+    reason: str = Field(min_length=1, max_length=240)
+
+
 class ReferenceImportError(RuntimeError):
     def __init__(self, message: str, *, retry_after: Optional[timedelta] = None):
         super().__init__(message)
@@ -319,6 +338,7 @@ class ReferenceCatalog:
         pinterest_search_interval_seconds: float = 21600.0,
         pinterest_target_pool_size: int = 160,
         pinterest_queries_per_cycle: int = 2,
+        local_generator: Optional[LocalMockupGenerator] = None,
     ) -> None:
         self.repository = repository
         self.client = genai.Client(api_key=api_key)
@@ -338,6 +358,7 @@ class ReferenceCatalog:
         )
         self.pinterest_target_pool_size = max(20, pinterest_target_pool_size)
         self.pinterest_queries_per_cycle = max(1, min(6, pinterest_queries_per_cycle))
+        self.local_generator = local_generator or LocalMockupGenerator()
         self._next_discovery_at = datetime.now(UTC)
         self._wake_event = asyncio.Event()
         self._stop_event = asyncio.Event()
@@ -380,9 +401,19 @@ class ReferenceCatalog:
                     "Автоматически восстановлено зависших референсов: %s",
                     recovered,
                 )
+            recovered_simple = await asyncio.to_thread(
+                self.repository.recover_simple_reference_preparations
+            )
+            if recovered_simple:
+                logger.warning(
+                    "Восстановлено подготовок простых референсов: %s",
+                    recovered_simple,
+                )
 
             await self._maybe_discover_from_pinterest()
-            processed = await self.process_next()
+            processed_import = await self.process_next()
+            processed_simple = await self.process_next_simple_reference()
+            processed = processed_import or processed_simple
             delay = (
                 self.import_delay_seconds if processed else self.idle_interval_seconds
             )
@@ -702,6 +733,188 @@ class ReferenceCatalog:
             )
         return True
 
+    async def process_next_simple_reference(self) -> bool:
+        asset = await asyncio.to_thread(
+            self.repository.claim_simple_reference_preparation
+        )
+        if asset is None:
+            return False
+        try:
+            if self.analysis_coordinator is None:
+                preparation = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._analyze_simple_preparation_sync,
+                        asset.image_bytes,
+                        asset.image_mime_type,
+                        asset.tags,
+                    ),
+                    timeout=self.analysis_timeout_seconds,
+                )
+            else:
+                async with self.analysis_coordinator.background():
+                    preparation = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._analyze_simple_preparation_sync,
+                            asset.image_bytes,
+                            asset.image_mime_type,
+                            asset.tags,
+                        ),
+                        timeout=self.analysis_timeout_seconds,
+                    )
+
+            if not preparation.suitable:
+                await asyncio.to_thread(
+                    self.repository.store_simple_reference_variant,
+                    asset.id,
+                    image_bytes=None,
+                    image_mime_type=None,
+                    thumbnail_bytes=None,
+                    ready=False,
+                    reason=preparation.reason,
+                )
+                logger.info(
+                    "Референс #%s не подготовлен для простого режима: %s",
+                    asset.id,
+                    preparation.reason,
+                )
+                return True
+
+            prepared = await self.local_generator.prepare_simple_reference(
+                image_bytes=asset.image_bytes,
+                reference_tags=asset.tags,
+                preparation=preparation.model_dump(),
+            )
+            normalized, thumbnail, _, _, mime_type = _resize_reference_image(
+                prepared.data
+            )
+            await asyncio.to_thread(
+                self.repository.store_simple_reference_variant,
+                asset.id,
+                image_bytes=normalized,
+                image_mime_type=mime_type,
+                thumbnail_bytes=thumbnail,
+                ready=True,
+                reason=(
+                    "старый принт удален заранее"
+                    if preparation.existing_print_present
+                    else "чистая зона принта готова"
+                ),
+            )
+            logger.info(
+                "Референс #%s подготовлен для простого режима", asset.id
+            )
+        except (asyncio.TimeoutError, LocalCompositeNeedsGemini, ReferenceImportError) as error:
+            await asyncio.to_thread(
+                self.repository.store_simple_reference_variant,
+                asset.id,
+                image_bytes=None,
+                image_mime_type=None,
+                thumbnail_bytes=None,
+                ready=False,
+                reason=str(error),
+            )
+            logger.info(
+                "Референс #%s пропущен для простого режима: %s",
+                asset.id,
+                error,
+            )
+        except Exception as error:
+            await asyncio.to_thread(
+                self.repository.store_simple_reference_variant,
+                asset.id,
+                image_bytes=None,
+                image_mime_type=None,
+                thumbnail_bytes=None,
+                ready=False,
+                reason=f"Ошибка подготовки: {str(error)[:220]}",
+            )
+            logger.warning(
+                "Ошибка подготовки референса #%s для простого режима: %s",
+                asset.id,
+                error,
+            )
+        return True
+
+    def _analyze_simple_preparation_sync(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        tags: dict[str, object],
+    ) -> SimpleReferencePreparation:
+        prompt = (
+            "Prepare this real fashion photo as a reusable base for a local OpenCV DTF "
+            "mockup. Do not generate or edit the image. Analyze geometry only. The visible "
+            "garment must be an adult t-shirt with a clearly open front or back panel. "
+            "target_print_box and target_print_quad define the largest safe central area "
+            "where a new design can later be placed. Return four points in order top-left, "
+            "top-right, bottom-right, bottom-left. If an existing logo, text or graphic is "
+            "present, tightly bound the complete old artwork in existing_print_box and "
+            "existing_print_quad. existing_print_coverable is true only when all old artwork "
+            "is visible, not crossed by hands, hair, a bag, seams or deep folds, and occupies "
+            "at most 24 percent of the usable garment panel. fabric_reconstruction_safe is "
+            "true only for solid or mildly shaded cotton where nearby clean fabric can rebuild "
+            "the old-print area. Reject acid wash, heavy mottling, gradients, complex texture, "
+            "strong folds, occlusion, extreme perspective, full-body distance, or hidden print "
+            "area. A plain shirt can be suitable without cleanup. suitable requires at least "
+            "88 percent print-area visibility, a valid target box or quad, and safe local "
+            "preparation. Keep the reason short. Existing catalog tags: "
+            f"{tags}."
+        )
+        response = self.client.models.generate_content(
+            model=self.analysis_model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=SimpleReferencePreparation,
+                temperature=0,
+            ),
+        )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, SimpleReferencePreparation):
+            result = parsed
+        elif parsed is not None:
+            result = SimpleReferencePreparation.model_validate(parsed)
+        elif response.text:
+            result = SimpleReferencePreparation.model_validate_json(response.text)
+        else:
+            raise ReferenceImportError(
+                "Gemini не подготовил геометрию простого референса"
+            )
+        geometry_ok = (
+            result.target_print_box is not None
+            or len(result.target_print_quad) == 4
+        )
+        old_geometry_ok = (
+            not result.existing_print_present
+            or result.existing_print_box is not None
+            or len(result.existing_print_quad) == 4
+        )
+        suitable = (
+            result.suitable
+            and result.print_area_visibility >= 88
+            and geometry_ok
+            and old_geometry_ok
+            and (
+                not result.existing_print_present
+                or (
+                    result.existing_print_coverable
+                    and result.fabric_reconstruction_safe
+                    and result.existing_print_coverage_percent <= 24
+                )
+            )
+        )
+        if not suitable and result.suitable:
+            return result.model_copy(
+                update={
+                    "suitable": False,
+                    "reason": "Геометрия или ткань не прошли локальную проверку",
+                }
+            )
+        return result
+
     async def _read_limited(
         self,
         response: aiohttp.ClientResponse,
@@ -848,6 +1061,7 @@ class ReferenceCatalog:
         print_side: Optional[Literal["front", "back"]] = None,
         exclude_ids: Sequence[int] = (),
         preferred_source_name: str = "",
+        simple_only: bool = False,
         rng: Optional[random.Random] = None,
     ) -> Optional[ReferenceAsset]:
         excluded = set(exclude_ids)
@@ -855,6 +1069,8 @@ class ReferenceCatalog:
         scored: list[tuple[float, ReferenceAsset]] = []
         for asset in self.repository.list_ready_reference_assets():
             if asset.id in excluded:
+                continue
+            if simple_only and not asset.simple_ready:
                 continue
             tags = asset.tags
             garments = set(tags.get("garment_types", []))
@@ -1330,6 +1546,7 @@ class ReferenceCatalog:
 
     def status_text(self) -> str:
         stats = self.repository.reference_stats()
+        simple_stats = self.repository.simple_reference_stats()
         queue_details = self.repository.reference_queue_details()
         assets = self.repository.list_ready_reference_assets()
         garments: Counter[str] = Counter()
@@ -1392,6 +1609,8 @@ class ReferenceCatalog:
             "Каталог референсов\n"
             f"Всего ссылок: {stats.get('total', 0)}\n"
             f"Готово: {stats.get('ready', 0)}\n"
+            f"Для простого режима: {simple_stats.get('ready', 0)} готово, "
+            f"{simple_stats.get('pending', 0) + simple_stats.get('processing', 0)} готовится\n"
             + "\n".join(waiting_lines)
             + "\n"
             f"Не подходят: {stats.get('disabled', 0)}\n"
