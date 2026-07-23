@@ -446,7 +446,7 @@ class PostRepository:
                     ELSE COALESCE(NULLIF(lifecycle_state, ''), 'raw')
                 END,
                 simple_level = CASE
-                    WHEN simple_ready = 1 AND simple_reason LIKE '%чистая%' THEN 'A'
+                    WHEN simple_ready = 1 AND simple_reason LIKE ? THEN 'A'
                     WHEN simple_ready = 1 THEN 'B'
                     WHEN simple_status = 'skipped' THEN 'C'
                     ELSE COALESCE(NULLIF(simple_level, ''), 'C')
@@ -456,6 +456,7 @@ class PostRepository:
                     ELSE simple_quality_score
                 END
             """,
+            ("%чистая%",),
         )
 
     def close(self) -> None:
