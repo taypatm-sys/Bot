@@ -32,7 +32,14 @@ async def main() -> None:
 
     bot = Bot(token=config.telegram_bot_token)
     repository = PostRepository(config.database_source)
-    repository.initialize()
+    try:
+        repository.initialize()
+    except Exception:
+        # Initialization may open the PostgreSQL pool before a migration fails.
+        # Close it explicitly and preserve the original traceback.
+        repository.close()
+        await bot.session.close()
+        raise
     guard = SingleInstanceGuard(
         database_url=config.database_url,
         bot_token=config.telegram_bot_token,
