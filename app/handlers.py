@@ -18,6 +18,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from app.bfl_generator import BflMockupGenerator
 from app.config import Config
 from app.copywriter import ImageCopywriter
 from app.formatting import (
@@ -28,6 +29,7 @@ from app.formatting import (
     render_caption_text,
     split_product_title,
 )
+from app.generation_router import choose_generation_model
 from app.models import ProductPreset, ScheduledPost
 from app.mockup_generator import (
     MockupAnalysisError,
@@ -88,15 +90,27 @@ def main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="Фото на модели"),
             ],
             [
-                KeyboardButton(text="Запланированные"),
-                KeyboardButton(text="Пресеты"),
-            ],
-            [
-                KeyboardButton(text="Шаблон"),
-                KeyboardButton(text="Референсы"),
+                KeyboardButton(text="Очередь"),
+                KeyboardButton(text="Настройки"),
             ],
         ],
         resize_keyboard=True,
+    )
+
+
+def settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Пресеты", callback_data="settings:presets"),
+                InlineKeyboardButton(text="Шаблон", callback_data="settings:template"),
+            ],
+            [
+                InlineKeyboardButton(text="Референсы", callback_data="settings:references"),
+                InlineKeyboardButton(text="Проверка", callback_data="settings:check"),
+            ],
+            [InlineKeyboardButton(text="Закрыть", callback_data="settings:close")],
+        ]
     )
 
 
@@ -505,14 +519,14 @@ def queue_edit_keyboard(post_id: int) -> InlineKeyboardMarkup:
 
 
 async def is_admin_message(message: Message, config: Config) -> bool:
-    if message.from_user and message.from_user.id == config.admin_telegram_id:
+    if message.from_user and message.from_user.id in config.admin_ids:
         return True
     await message.answer("У вас нет доступа к управлению этим ботом.")
     return False
 
 
 async def is_admin_callback(callback: CallbackQuery, config: Config) -> bool:
-    if callback.from_user.id == config.admin_telegram_id:
+    if callback.from_user.id in config.admin_ids:
         return True
     await callback.answer("Нет доступа", show_alert=True)
     return False
@@ -579,6 +593,7 @@ def build_router(
     repository: PostRepository,
     copywriter: ImageCopywriter,
     mockup_generator: MockupGenerator,
+    economy_generator: BflMockupGenerator,
     reference_catalog: ReferenceCatalog,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
@@ -780,6 +795,62 @@ def build_router(
             garment_type=spec.garment_type if spec else None,
             exclude_labels=used_labels,
         )
+        await status_message.edit_text(
+            "Ищу подходящие референсы в Pinterest и пополняю базу. "
+            "Платная генерация еще не запущена."
+        )
+        dynamic_source_name = ""
+        try:
+            dynamic_source_name, discovered_count, processed_count = (
+                await reference_catalog.discover_for_product(
+                    garment_type=spec.garment_type,
+                    target_gender=spec.target_gender,
+                    moods=spec.moods,
+                    print_side=spec.side,
+                    shirt_color=spec.shirt_color,
+                    fit=spec.fit,
+                    import_now=4,
+                )
+            )
+            repository.set_setting(
+                "last_pinterest_product_discovered", str(discovered_count)
+            )
+            repository.set_setting(
+                "last_pinterest_product_processed", str(processed_count)
+            )
+        except Exception as error:
+            logger.warning("Поиск Pinterest перед генерацией не выполнен: %s", error)
+            repository.set_setting(
+                "pinterest_discovery_status", f"ошибка поиска по товару: {str(error)[:160]}"
+            )
+
+        generation_decision = choose_generation_model(
+            spec=spec,
+            has_separate_print=bool(print_bytes),
+            economy_available=economy_generator.available,
+            economy_model=config.bfl_economy_model,
+            gemini_lite_model=config.gemini_image_model,
+        )
+        repository.set_setting(
+            "last_mockup_provider", generation_decision.provider_label_ru
+        )
+        repository.set_setting("last_mockup_model", generation_decision.model)
+        repository.set_setting("last_mockup_complexity", generation_decision.label_ru)
+        repository.set_setting(
+            "last_mockup_complexity_reasons",
+            ", ".join(generation_decision.reasons),
+        )
+        if generation_decision.provider == "none":
+            repository.set_setting("last_mockup_status", "нужен BFL_API_KEY")
+            await state.set_state(DraftStates.model_analysis_ready)
+            await status_message.edit_text(
+                "Эта задача не требует Gemini. Экономная модель FLUX не подключена, "
+                "поэтому генерация остановлена без списания. Добавьте BFL_API_KEY "
+                "в Render и повторите.",
+                reply_markup=model_analysis_keyboard(has_print=bool(print_file_id)),
+            )
+            return
+
         generated_file_ids: list[str] = []
         generation_error: str | None = None
 
@@ -791,8 +862,10 @@ def build_router(
             reference_asset = None
             excluded_reference_ids: list[int] = []
             preflight_reasons: list[str] = []
+            reference_replacements = 0
 
             repository.set_setting("last_mockup_reference_passed", "нет")
+            repository.set_setting("last_mockup_reference_replacements", "0")
             repository.set_setting("last_mockup_reference_count", "0")
             repository.set_setting("last_mockup_status", "подбор референса")
             await status_message.edit_text(
@@ -809,6 +882,7 @@ def build_router(
                     request_token=candidate_token,
                     print_side=spec.side,
                     exclude_ids=excluded_reference_ids,
+                    preferred_source_name=dynamic_source_name,
                 )
                 if candidate is None:
                     break
@@ -841,6 +915,11 @@ def build_router(
 
                 if not compatibility.compatible:
                     excluded_reference_ids.append(candidate.id)
+                    reference_replacements += 1
+                    repository.set_setting(
+                        "last_mockup_reference_replacements",
+                        str(reference_replacements),
+                    )
                     preflight_reasons.append(
                         f"#{candidate.id}: {compatibility.reason}"
                     )
@@ -879,10 +958,13 @@ def build_router(
             repository.set_setting("last_mockup_status", "генерация")
             await status_message.edit_text(
                 f"Создаю вариант {index} из {len(directions)}. "
-                f"Референс #{reference_asset.id} передан Gemini."
+                f"Референс #{reference_asset.id} проверен и передан модели. "
+                f"Сложность: {generation_decision.label_ru}. "
+                f"Провайдер: {generation_decision.provider_label_ru}. "
+                f"Модель: {generation_decision.model}."
             )
             try:
-                generated_photo = await mockup_generator.generate_variant(
+                generator_kwargs = dict(
                     image_bytes=source_bytes,
                     mime_type=source_mime_type,
                     spec=spec,
@@ -894,6 +976,15 @@ def build_router(
                     reference_mime_type=reference_asset.image_mime_type,
                     reference_tags=reference_asset.tags,
                 )
+                if generation_decision.provider == "bfl":
+                    generated_photo = await economy_generator.generate_variant(
+                        **generator_kwargs
+                    )
+                else:
+                    generated_photo = await mockup_generator.generate_variant(
+                        **generator_kwargs,
+                        image_model=generation_decision.model,
+                    )
             except MockupGenerationError as error:
                 repository.finish_reference_usage(usage_token, outcome="failed")
                 repository.set_setting("last_mockup_status", "ошибка генерации")
@@ -901,7 +992,6 @@ def build_router(
                 break
             repository.finish_reference_usage(usage_token, outcome="completed")
             repository.set_setting("last_mockup_status", "готово")
-
             sent = await message.answer_photo(
                 photo=BufferedInputFile(
                     generated_photo.data,
@@ -967,8 +1057,9 @@ def build_router(
             else "Работаю с локальной базой SQLite."
         )
         await message.answer(
-            "Бот готов. Для обычной публикации отправьте фотографию. Для создания "
-            "реалистичных кадров из макета нажмите «Фото на модели».\n"
+            "Выберите действие.\n"
+            "Создать пост - оформить готовое фото.\n"
+            "Фото на модели - перенести вещь на человека.\n"
             f"{storage_note}",
             reply_markup=main_keyboard(),
         )
@@ -1008,19 +1099,32 @@ def build_router(
             last_mockup_status = (
                 repository.get_setting("last_mockup_status") or "еще не запускалось"
             )
+            last_reference_replacements = (
+                repository.get_setting("last_mockup_reference_replacements") or "0"
+            )
             await message.answer(
                 "Настройки работают.\n"
                 f"Бот: @{bot_info.username}\n"
                 f"Канал: {chat.title or chat.id}\n"
                 f"Статус бота в канале: {member.status}\n"
                 f"База: {repository.backend_name}\n"
-                f"Фото на модели: {config.gemini_image_model}, "
-                f"{config.gemini_image_size}, 4:5\n"
-                "Режим: обязательный референс\n"
+                f"Администраторов: {len(config.admin_ids)}\n"
+                f"Обычные задачи: {config.bfl_economy_model if economy_generator.available else 'заблокированы, нужен BFL_API_KEY'}\n"
+                f"Сложные задачи: {config.bfl_economy_model if economy_generator.available else 'заблокированы, нужен BFL_API_KEY'}\n"
+                f"Очень сложные: {config.gemini_image_model}\n"
+                f"Формат: {config.gemini_image_size}, 4:5\n"
+                "Режим: обязательный проверенный референс\n"
                 f"Референсов готово: {ready_references}\n"
                 f"В последней генерации: {last_reference_count}\n"
                 f"Последний референс: {last_reference_label}\n"
-                f"Передан Gemini: {last_reference_passed}\n"
+                f"Автозамен до запуска: {last_reference_replacements}\n"
+                f"Последний провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
+                f"Последняя модель: {repository.get_setting('last_mockup_model') or 'еще не запускалось'}\n"
+                f"Сложность: {repository.get_setting('last_mockup_complexity') or 'еще не определялась'}\n"
+                f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
+                f"Найдено по последнему товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
+                f"Обработано по последнему товару: {repository.get_setting('last_pinterest_product_processed') or '0'}\n"
+                f"Референс передан модели: {last_reference_passed}\n"
                 f"Статус генерации: {last_mockup_status}"
             )
         except Exception as error:
@@ -1029,6 +1133,98 @@ def build_router(
                 "Проверка не пройдена. Проверьте CHANNEL_ID, права бота в канале "
                 "и подключение базы.\n\n"
                 f"Ошибка: {error}"
+            )
+
+    @router.message(F.text == "Настройки")
+    async def show_settings(message: Message, state: FSMContext) -> None:
+        if not await is_admin_message(message, config):
+            return
+        await state.clear()
+        await message.answer(
+            "Настройки бота",
+            reply_markup=settings_keyboard(),
+        )
+
+    @router.callback_query(F.data == "settings:close")
+    async def close_settings(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.edit_text("Настройки закрыты")
+
+    @router.callback_query(F.data == "settings:presets")
+    async def settings_presets(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        presets = repository.list_presets()
+        if presets:
+            lines = [
+                f"{index}. {item.name} | {item.size} | {item.price}"
+                for index, item in enumerate(presets, start=1)
+            ]
+            text_value = "Готовые пресеты:\n\n" + "\n".join(lines)
+        else:
+            text_value = "Готовых пресетов пока нет."
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                text_value, reply_markup=preset_manager_keyboard(presets)
+            )
+
+    @router.callback_query(F.data == "settings:template")
+    async def settings_template(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Текущий шаблон:\n\n"
+                f"{template_store.get()}\n\n"
+                "Изменить: /settemplate"
+            )
+
+    @router.callback_query(F.data == "settings:references")
+    async def settings_references(callback: CallbackQuery) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                reference_catalog.status_text(),
+                reply_markup=references_keyboard(),
+            )
+
+    @router.callback_query(F.data == "settings:check")
+    async def settings_check(callback: CallbackQuery, bot: Bot) -> None:
+        if not await is_admin_callback(callback, config):
+            return
+        ready_references = repository.reference_stats().get("ready", 0)
+        last_reference_id = repository.get_setting("last_mockup_reference_id") or "нет"
+        last_reference_label = (
+            f"#{last_reference_id}" if last_reference_id != "нет" else "нет"
+        )
+        last_reference_count = repository.get_setting("last_mockup_reference_count") or "0"
+        last_reference_passed = repository.get_setting("last_mockup_reference_passed") or "еще не запускалось"
+        last_mockup_status = repository.get_setting("last_mockup_status") or "еще не запускалось"
+        replacements = repository.get_setting("last_mockup_reference_replacements") or "0"
+        bot_info = await bot.get_me()
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Проверка пройдена.\n"
+                f"Бот: @{bot_info.username}\n"
+                f"База: {repository.backend_name}\n"
+                f"Администраторов: {len(config.admin_ids)}\n"
+                f"Референсов: {ready_references}\n"
+                f"Последний: {last_reference_label}\n"
+                f"Автозамен: {replacements}\n"
+                f"Провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
+                f"Модель: {repository.get_setting('last_mockup_model') or 'еще не запускалась'}\n"
+                f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
+                f"Найдено по товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
+                f"Референс передан модели: {last_reference_passed}\n"
+                f"Статус: {last_mockup_status}"
             )
 
     @router.message(Command("references"))
@@ -1154,6 +1350,7 @@ def build_router(
 
     @router.message(Command("queue"))
     @router.message(F.text == "Запланированные")
+    @router.message(F.text == "Очередь")
     async def queue(message: Message) -> None:
         if not await is_admin_message(message, config):
             return
@@ -1549,11 +1746,9 @@ def build_router(
         repository.clear_model_draft(message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
         await message.answer(
-            "Отправьте фото или макет вещи с уже размещенным принтом. "
-            "Лучше отправить его как файл PNG, JPEG или WEBP.\n\n"
-            "Исходное фото будет главным источником цвета, ткани, формы и принта. "
-            "Отдельный PNG принта не требуется. Генерация начнется только после "
-            "вашего подтверждения."
+            "Шаг 1 из 2. Отправьте фото вещи с уже размещенным принтом.\n"
+            "Исходное фото сохранит цвет, ткань, крой и сам принт.\n"
+            "Отдельный PNG не требуется."
         )
 
     async def accept_model_mockup(
@@ -1629,6 +1824,18 @@ def build_router(
         await state.update_data(model_mockup_spec=spec.model_dump())
         await state.set_state(DraftStates.model_analysis_ready)
         await save_model_draft(state, message.chat.id)
+        try:
+            await reference_catalog.discover_for_product(
+                garment_type=spec.garment_type,
+                target_gender=spec.target_gender,
+                moods=spec.moods,
+                print_side=spec.side,
+                shirt_color=spec.shirt_color,
+                fit=spec.fit,
+                import_now=0,
+            )
+        except Exception as error:
+            logger.warning("Фоновый поиск Pinterest после анализа не выполнен: %s", error)
         await status_message.edit_text(
             format_model_analysis(spec),
             reply_markup=model_analysis_keyboard(has_print=False),

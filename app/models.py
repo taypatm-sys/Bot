@@ -56,3 +56,4 @@ class ReferenceAsset:
     use_count: int
     last_used_at_utc: Optional[datetime]
     cooldown_until_utc: Optional[datetime]
+    source_name: str = ""

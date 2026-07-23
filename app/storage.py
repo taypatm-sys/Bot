@@ -109,6 +109,7 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
         use_count=int(row["use_count"] or 0),
         last_used_at_utc=_optional_datetime(row["last_used_at_utc"]),
         cooldown_until_utc=_optional_datetime(row["cooldown_until_utc"]),
+        source_name=str(row["source_name"] or ""),
     )
 
 
@@ -540,23 +541,30 @@ class PostRepository:
                     added += 1
         return added, total
 
-    def claim_reference_import(self) -> Optional[ReferenceImportJob]:
+    def claim_reference_import(
+        self,
+        *,
+        source_name: Optional[str] = None,
+    ) -> Optional[ReferenceImportJob]:
         now = _iso(datetime.now(UTC))
+        source_filter = " AND source_name = ?" if source_name else ""
+        params: tuple[Any, ...] = (now, source_name) if source_name else (now,)
         with self._connect() as connection:
             row = self._execute(
                 connection,
-                """
+                f"""
                 SELECT id, source_url, resolved_image_url, image_bytes,
                        image_mime_type, attempt_count
                 FROM reference_assets
                 WHERE status IN ('pending', 'retry')
                   AND (next_retry_at_utc IS NULL OR next_retry_at_utc <= ?)
+                  {source_filter}
                 ORDER BY
                     CASE WHEN image_bytes IS NOT NULL THEN 0 ELSE 1 END,
                     id ASC
                 LIMIT 1
                 """,
-                (now,),
+                params,
             ).fetchone()
             if not row:
                 return None
@@ -822,6 +830,18 @@ class PostRepository:
                 (now, max(1, limit)),
             ).fetchall()
         return [_row_to_reference_asset(row) for row in rows]
+
+    def get_reference_asset(self, reference_id: int) -> Optional[ReferenceAsset]:
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM reference_assets
+                WHERE id = ? AND status = 'ready' AND image_bytes IS NOT NULL
+                """,
+                (reference_id,),
+            ).fetchone()
+        return _row_to_reference_asset(row) if row else None
 
     def reserve_reference(
         self,

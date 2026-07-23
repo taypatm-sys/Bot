@@ -55,6 +55,53 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
 PIN_ID_PATTERN = re.compile(r"/pin/(\d+)", re.IGNORECASE)
 MAX_HTML_BYTES = 3 * 1024 * 1024
 MAX_IMAGE_DOWNLOAD_BYTES = 12 * 1024 * 1024
+PINTEREST_SEARCH_ENDPOINT = "https://api.pinterest.com/v5/search/partner/pins"
+PINTEREST_DISCOVERY_QUERIES = (
+    "men oversized t shirt front streetwear waist up flash photography",
+    "men oversized t shirt back print rear view streetwear",
+    "women oversized t shirt front outfit waist up natural photo",
+    "women oversized t shirt back print rear view beach outfit",
+    "unisex oversized t shirt front close up street photography",
+    "unisex oversized t shirt back print rear three quarter",
+    "men hoodie front streetwear waist up",
+    "women hoodie back print rear view outfit",
+    "men sweatshirt front casual flash photography",
+    "women sweatshirt back print rear view",
+    "streetwear cap front close up lifestyle photo",
+    "oversized long sleeve front streetwear waist up",
+)
+
+
+PINTEREST_GARMENT_TERMS = {
+    "t-shirt": "t shirt",
+    "hoodie": "hoodie",
+    "sweatshirt": "sweatshirt",
+    "long-sleeve": "long sleeve shirt",
+    "zip-hoodie": "zip hoodie",
+    "cap": "cap streetwear",
+    "jacket": "streetwear jacket",
+}
+PINTEREST_GENDER_TERMS = {
+    "women": "woman",
+    "men": "man",
+    "unisex": "streetwear model",
+}
+PINTEREST_SIDE_TERMS = {
+    "front": "front view print area visible",
+    "back": "rear view back print area visible",
+}
+PINTEREST_MOOD_TERMS = {
+    "calm": "natural lifestyle",
+    "bold": "bold streetwear",
+    "cozy": "cozy casual",
+    "sporty": "sporty streetwear",
+    "youth": "youth street style",
+    "romantic": "soft aesthetic",
+    "playful": "playful outfit",
+    "minimal": "minimal outfit",
+    "premium": "premium casual",
+    "street": "street photography",
+}
 
 
 class ReferenceTags(BaseModel):
@@ -239,8 +286,14 @@ class ReferenceCatalog:
         max_attempts: int = 5,
         min_pool_size: int = 20,
         analysis_timeout_seconds: float = 90.0,
-        user_agent: str = "TaypaReferenceCatalog/4.0",
+        user_agent: str = "TaypaReferenceCatalog/5.2",
         analysis_coordinator: Optional[AnalysisCoordinator] = None,
+        pinterest_access_token: str = "",
+        pinterest_search_enabled: bool = False,
+        pinterest_country_code: str = "US",
+        pinterest_search_interval_seconds: float = 21600.0,
+        pinterest_target_pool_size: int = 160,
+        pinterest_queries_per_cycle: int = 2,
     ) -> None:
         self.repository = repository
         self.client = genai.Client(api_key=api_key)
@@ -252,6 +305,15 @@ class ReferenceCatalog:
         self.analysis_timeout_seconds = max(30.0, analysis_timeout_seconds)
         self.user_agent = user_agent
         self.analysis_coordinator = analysis_coordinator
+        self.pinterest_access_token = pinterest_access_token.strip()
+        self.pinterest_search_enabled = bool(pinterest_search_enabled)
+        self.pinterest_country_code = (pinterest_country_code.strip().upper() or "US")[:2]
+        self.pinterest_search_interval_seconds = max(
+            900.0, pinterest_search_interval_seconds
+        )
+        self.pinterest_target_pool_size = max(20, pinterest_target_pool_size)
+        self.pinterest_queries_per_cycle = max(1, min(6, pinterest_queries_per_cycle))
+        self._next_discovery_at = datetime.now(UTC)
         self._wake_event = asyncio.Event()
         self._stop_event = asyncio.Event()
 
@@ -293,6 +355,8 @@ class ReferenceCatalog:
                     "Автоматически восстановлено зависших референсов: %s",
                     recovered,
                 )
+
+            await self._maybe_discover_from_pinterest()
             processed = await self.process_next()
             delay = (
                 self.import_delay_seconds if processed else self.idle_interval_seconds
@@ -302,8 +366,237 @@ class ReferenceCatalog:
             except asyncio.TimeoutError:
                 pass
 
-    async def process_next(self) -> bool:
-        job = await asyncio.to_thread(self.repository.claim_reference_import)
+    def build_product_search_queries(
+        self,
+        *,
+        garment_type: GarmentTag,
+        target_gender: Literal["women", "men", "unisex"],
+        moods: Sequence[MoodTag],
+        print_side: Literal["front", "back"],
+        shirt_color: str = "",
+        fit: str = "",
+    ) -> list[str]:
+        garment = PINTEREST_GARMENT_TERMS.get(garment_type, garment_type)
+        gender = PINTEREST_GENDER_TERMS.get(target_gender, "streetwear model")
+        side = PINTEREST_SIDE_TERMS[print_side]
+        mood = next(
+            (PINTEREST_MOOD_TERMS[item] for item in moods if item in PINTEREST_MOOD_TERMS),
+            "natural lifestyle",
+        )
+        color = " ".join(shirt_color.strip().casefold().split())
+        fit_term = "oversized" if "overs" in fit.casefold() else "relaxed fit"
+        core = " ".join(part for part in (gender, color, fit_term, garment, side) if part)
+        if print_side == "back":
+            framing = "rear three quarter waist up no bag covering shirt"
+        elif garment_type == "cap":
+            framing = "close up portrait cap front visible"
+        else:
+            framing = "waist up torso visible natural pose"
+        return list(
+            dict.fromkeys(
+                [
+                    f"{core} {mood} {framing}",
+                    f"{gender} {garment} {side} street style photography {framing}",
+                    f"{gender} wearing {color} {garment} {side} casual outfit photo",
+                ]
+            )
+        )
+
+    async def discover_for_product(
+        self,
+        *,
+        garment_type: GarmentTag,
+        target_gender: Literal["women", "men", "unisex"],
+        moods: Sequence[MoodTag],
+        print_side: Literal["front", "back"],
+        shirt_color: str = "",
+        fit: str = "",
+        import_now: int = 0,
+    ) -> tuple[str, int, int]:
+        """Find composition references on Pinterest and grow the catalog.
+
+        The search is built from the current product instead of only comparing
+        against the original seed catalog. Newly found pins are deduplicated by
+        URL and tagged before they can be used.
+        """
+        if not self.pinterest_search_enabled:
+            self.repository.set_setting("pinterest_discovery_status", "выключен")
+            return "", 0, 0
+        if not self.pinterest_access_token:
+            self.repository.set_setting(
+                "pinterest_discovery_status", "нужен PINTEREST_ACCESS_TOKEN"
+            )
+            return "", 0, 0
+
+        queries = self.build_product_search_queries(
+            garment_type=garment_type,
+            target_gender=target_gender,
+            moods=moods,
+            print_side=print_side,
+            shirt_color=shirt_color,
+            fit=fit,
+        )
+        signature = "|".join(queries).encode("utf-8")
+        source_name = f"pinterest-product-{hashlib.sha1(signature).hexdigest()[:12]}"
+        added = await self._search_pinterest_terms(
+            queries[: self.pinterest_queries_per_cycle],
+            source_name=source_name,
+            max_urls=12,
+        )
+        processed = 0
+        for _ in range(max(0, min(import_now, 8))):
+            if not await self.process_next(source_name=source_name):
+                break
+            processed += 1
+        self.repository.set_setting(
+            "pinterest_discovery_status",
+            f"поиск по товару: добавлено {added}, обработано {processed}",
+        )
+        self.repository.set_setting(
+            "pinterest_last_product_queries", " || ".join(queries)[:1500]
+        )
+        if added:
+            self._wake_event.set()
+        return source_name, added, processed
+
+    async def _search_pinterest_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        source_name: str,
+        max_urls: int = 30,
+    ) -> int:
+        timeout = aiohttp.ClientTimeout(total=35, connect=10, sock_read=20)
+        headers = {
+            "Authorization": f"Bearer {self.pinterest_access_token}",
+            "Accept": "application/json",
+            "User-Agent": self.user_agent,
+        }
+        discovered_urls: list[str] = []
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            for term in terms:
+                params = {
+                    "term": term,
+                    "country_code": self.pinterest_country_code,
+                }
+                async with session.get(
+                    PINTEREST_SEARCH_ENDPOINT, params=params
+                ) as response:
+                    if response.status == 429:
+                        raise ReferenceImportError(
+                            "Pinterest ограничил частоту автопоиска",
+                            retry_after=timedelta(hours=1),
+                        )
+                    if response.status in {401, 403}:
+                        raise ReferenceImportError(
+                            "Pinterest API не разрешил поиск. Проверьте OAuth token и доступ к search/partner/pins"
+                        )
+                    if response.status >= 400:
+                        body = (await response.text())[:240]
+                        raise ReferenceImportError(
+                            f"Pinterest API вернул {response.status}: {body}"
+                        )
+                    payload = await response.json(content_type=None)
+                discovered_urls.extend(self._pinterest_result_urls(payload))
+                if len(discovered_urls) >= max_urls:
+                    break
+        unique_urls = list(dict.fromkeys(discovered_urls))[:max_urls]
+        added, _ = self.repository.enqueue_reference_urls(
+            unique_urls, source_name=source_name
+        )
+        return added
+
+    async def _maybe_discover_from_pinterest(self) -> int:
+        if not self.pinterest_search_enabled:
+            self.repository.set_setting("pinterest_discovery_status", "выключен")
+            return 0
+        if not self.pinterest_access_token:
+            self.repository.set_setting(
+                "pinterest_discovery_status", "нужен PINTEREST_ACCESS_TOKEN"
+            )
+            return 0
+        now = datetime.now(UTC)
+        if now < self._next_discovery_at:
+            return 0
+        ready = self.repository.reference_stats().get("ready", 0)
+        if ready >= self.pinterest_target_pool_size:
+            self.repository.set_setting(
+                "pinterest_discovery_status",
+                f"база заполнена: {ready}/{self.pinterest_target_pool_size}",
+            )
+            self._next_discovery_at = now + timedelta(
+                seconds=self.pinterest_search_interval_seconds
+            )
+            return 0
+
+        try:
+            added = await self.discover_from_pinterest()
+            self.repository.set_setting(
+                "pinterest_discovery_status", f"работает, новых ссылок: {added}"
+            )
+            self.repository.set_setting(
+                "pinterest_last_discovery_at", now.isoformat()
+            )
+        except Exception as error:
+            logger.warning("Автопоиск Pinterest не выполнен: %s", error)
+            self.repository.set_setting(
+                "pinterest_discovery_status", f"ошибка: {str(error)[:160]}"
+            )
+            added = 0
+        self._next_discovery_at = now + timedelta(
+            seconds=self.pinterest_search_interval_seconds
+        )
+        if added:
+            self._wake_event.set()
+        return added
+
+    async def discover_from_pinterest(self) -> int:
+        """Grow a broad fallback pool through the official Pinterest API."""
+        index_raw = self.repository.get_setting("pinterest_discovery_query_index") or "0"
+        try:
+            start_index = int(index_raw)
+        except ValueError:
+            start_index = 0
+        terms = [
+            PINTEREST_DISCOVERY_QUERIES[
+                (start_index + offset) % len(PINTEREST_DISCOVERY_QUERIES)
+            ]
+            for offset in range(self.pinterest_queries_per_cycle)
+        ]
+        added = await self._search_pinterest_terms(
+            terms, source_name="pinterest-auto-search", max_urls=30
+        )
+        next_index = (start_index + self.pinterest_queries_per_cycle) % len(
+            PINTEREST_DISCOVERY_QUERIES
+        )
+        self.repository.set_setting(
+            "pinterest_discovery_query_index", str(next_index)
+        )
+        return added
+
+    @staticmethod
+    def _pinterest_result_urls(payload: object) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return []
+        urls: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            pin_id = str(item.get("id", "")).strip()
+            if pin_id.isdigit():
+                urls.append(f"https://www.pinterest.com/pin/{pin_id}/")
+                continue
+            link = str(item.get("link", "")).strip()
+            urls.extend(normalize_reference_urls(link))
+        return urls
+
+    async def process_next(self, *, source_name: Optional[str] = None) -> bool:
+        job = await asyncio.to_thread(
+            self.repository.claim_reference_import, source_name=source_name
+        )
         if job is None:
             return False
         try:
@@ -525,6 +818,7 @@ class ReferenceCatalog:
         season: Optional[Literal["warm", "cold", "all-season"]] = None,
         print_side: Optional[Literal["front", "back"]] = None,
         exclude_ids: Sequence[int] = (),
+        preferred_source_name: str = "",
         rng: Optional[random.Random] = None,
     ) -> Optional[ReferenceAsset]:
         excluded = set(exclude_ids)
@@ -593,19 +887,22 @@ class ReferenceCatalog:
             score -= crowd_penalty
             if season and tags.get("season") in {season, "all-season"}:
                 score += 12
+            if preferred_source_name and asset.source_name == preferred_source_name:
+                score += 80
+
             score -= asset.use_count * 3
             scored.append((score, asset))
         if not scored:
             return None
-        scored.sort(key=lambda item: item[0], reverse=True)
-        picker = rng or secrets.SystemRandom()
-        top = scored[: min(5, len(scored))]
-        weights = [max(1.0, score - top[-1][0] + 5.0) for score, _ in top]
+        scored.sort(key=lambda item: (-item[0], item[1].use_count, item[1].id))
         token = request_token or secrets.token_hex(12)
-        remaining = list(top)
-        remaining_weights = list(weights)
-        while remaining:
-            _, asset = picker.choices(remaining, weights=remaining_weights, k=1)[0]
+        candidates = scored[: min(12, len(scored))]
+        if rng is not None and len(candidates) > 1:
+            top_score = candidates[0][0]
+            near_equal = [item for item in candidates if top_score - item[0] <= 4]
+            rng.shuffle(near_equal)
+            candidates = near_equal + [item for item in candidates if item not in near_equal]
+        for _, asset in candidates:
             if self.repository.reserve_reference(
                 asset.id,
                 request_token=token,
@@ -614,11 +911,6 @@ class ReferenceCatalog:
                 moods=list(moods),
             ):
                 return asset
-            index = next(
-                i for i, (_, item) in enumerate(remaining) if item.id == asset.id
-            )
-            remaining.pop(index)
-            remaining_weights.pop(index)
         return None
 
     async def validate_reference_for_generation(
@@ -778,5 +1070,7 @@ class ReferenceCatalog:
             f"По полу: женщины {genders.get('women', 0)}, "
             f"мужчины {genders.get('men', 0)}, унисекс {genders.get('unisex', 0)}\n\n"
             f"Цель: минимум {self.min_pool_size} доступных фото для каждой "
-            "используемой категории. Недостающие фото добавляются из новых списков."
+            "используемой категории.\n"
+            f"Автопоиск Pinterest: "
+            f"{self.repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}"
         )

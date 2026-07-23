@@ -173,7 +173,19 @@ def normalize_hashtag_value(value: str) -> str:
 
 
 def contact_link(username: str, title: str) -> str:
-    draft = f"Здравствуйте! Хочу заказать: {title}"
+    garment_type, design_name = split_product_title(title)
+    accusative = {
+        "Футболка": "футболку",
+        "Худи": "худи",
+        "Свитшот": "свитшот",
+        "Лонгслив": "лонгслив",
+        "Кепка": "кепку",
+        "Зип-худи": "зип-худи",
+        "Куртка": "куртку",
+        "Шопер": "шопер",
+    }.get(garment_type, garment_type.casefold() or "товар")
+    product = f"{accusative} «{design_name}»" if design_name else accusative
+    draft = f"Здравствуйте! Хочу заказать {product}."
     return f"https://t.me/{username}?text={quote(draft)}"
 
 

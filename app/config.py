@@ -1,5 +1,6 @@
 import os
 import shutil
+import re
 from dataclasses import dataclass
 from datetime import timedelta, timezone as fixed_timezone, tzinfo
 from pathlib import Path
@@ -61,6 +62,17 @@ def _positive_int(name: str, value: str, default: int) -> int:
     return result
 
 
+def _bool_env(name: str, value: str, default: bool = False) -> bool:
+    clean = value.strip().casefold()
+    if not clean:
+        return default
+    if clean in {"1", "true", "yes", "on", "да"}:
+        return True
+    if clean in {"0", "false", "no", "off", "нет"}:
+        return False
+    raise ConfigError(f"{name} должен быть true или false")
+
+
 def _positive_float(name: str, value: str, default: float) -> float:
     try:
         result = float(value.strip() or str(default))
@@ -76,6 +88,25 @@ def _required(name: str) -> str:
     if not value:
         raise ConfigError(f"в .env не заполнено поле {name}")
     return value
+
+
+
+def _parse_admin_ids(primary_value: str, extra_value: str) -> frozenset[int]:
+    raw_values = [primary_value]
+    raw_values.extend(re.split(r"[\s,;]+", extra_value.strip()))
+    result: set[int] = set()
+    for raw in raw_values:
+        value = raw.strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            raise ConfigError(
+                "ADMIN_TELEGRAM_ID и ADMIN_TELEGRAM_IDS должны содержать только цифровые ID"
+            )
+        result.add(int(value))
+    if not result:
+        raise ConfigError("не указан ни один администратор")
+    return frozenset(result)
 
 
 def _parse_channel_id(value: str) -> ChatId:
@@ -112,7 +143,12 @@ class Config:
     database_path: Path
     caption_template_path: Path
     database_url: str = ""
+    admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
+    bfl_api_key: str = ""
+    bfl_economy_model: str = "flux-2-klein-4b"
+    bfl_api_base: str = "https://api.bfl.ai/v1"
+    bfl_timeout_seconds: float = 150.0
     gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
     mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
     reference_sources_path: Path = BUNDLED_REFERENCE_SOURCES
@@ -122,14 +158,21 @@ class Config:
     reference_min_pool_size: int = 20
     reference_analysis_timeout_seconds: float = 90.0
     mockup_analysis_timeout_seconds: float = 150.0
-    reference_user_agent: str = "TaypaReferenceCatalog/4.0"
+    reference_user_agent: str = "TaypaReferenceCatalog/5.2"
+    pinterest_access_token: str = ""
+    pinterest_search_enabled: bool = False
+    pinterest_country_code: str = "US"
+    pinterest_search_interval_seconds: float = 21600.0
+    pinterest_target_pool_size: int = 160
+    pinterest_queries_per_cycle: int = 2
 
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
         admin_value = _required("ADMIN_TELEGRAM_ID")
-        if not admin_value.isdigit():
-            raise ConfigError("ADMIN_TELEGRAM_ID должен состоять только из цифр")
+        admin_ids = _parse_admin_ids(
+            admin_value, os.getenv("ADMIN_TELEGRAM_IDS", "")
+        )
 
         timezone_name = os.getenv("TIMEZONE", "Asia/Ashgabat").strip()
         _load_timezone(timezone_name)
@@ -161,9 +204,24 @@ class Config:
                 os.getenv("CAPTION_TEMPLATE_PATH", "caption_template.txt")
             ),
             database_url=database_url,
+            admin_telegram_ids=admin_ids,
             gemini_image_model=(
                 os.getenv("GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL).strip()
                 or DEFAULT_GEMINI_IMAGE_MODEL
+            ),
+            bfl_api_key=os.getenv("BFL_API_KEY", "").strip(),
+            bfl_economy_model=(
+                os.getenv("BFL_ECONOMY_MODEL", "flux-2-klein-4b").strip()
+                or "flux-2-klein-4b"
+            ),
+            bfl_api_base=(
+                os.getenv("BFL_API_BASE", "https://api.bfl.ai/v1").strip().rstrip("/")
+                or "https://api.bfl.ai/v1"
+            ),
+            bfl_timeout_seconds=_positive_float(
+                "BFL_TIMEOUT_SECONDS",
+                os.getenv("BFL_TIMEOUT_SECONDS", "150"),
+                150.0,
             ),
             gemini_image_size=normalize_gemini_image_size(
                 os.getenv("GEMINI_IMAGE_SIZE", DEFAULT_GEMINI_IMAGE_SIZE)
@@ -205,10 +263,38 @@ class Config:
                 150.0,
             ),
             reference_user_agent=(
-                os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/4.0").strip()
-                or "TaypaReferenceCatalog/4.0"
+                os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.2").strip()
+                or "TaypaReferenceCatalog/5.2"
+            ),
+            pinterest_access_token=os.getenv("PINTEREST_ACCESS_TOKEN", "").strip(),
+            pinterest_search_enabled=_bool_env(
+                "PINTEREST_SEARCH_ENABLED",
+                os.getenv("PINTEREST_SEARCH_ENABLED", "true"),
+                default=True,
+            ),
+            pinterest_country_code=(
+                os.getenv("PINTEREST_COUNTRY_CODE", "US").strip().upper() or "US"
+            ),
+            pinterest_search_interval_seconds=_positive_float(
+                "PINTEREST_SEARCH_INTERVAL_SECONDS",
+                os.getenv("PINTEREST_SEARCH_INTERVAL_SECONDS", "21600"),
+                21600.0,
+            ),
+            pinterest_target_pool_size=_positive_int(
+                "PINTEREST_TARGET_POOL_SIZE",
+                os.getenv("PINTEREST_TARGET_POOL_SIZE", "160"),
+                160,
+            ),
+            pinterest_queries_per_cycle=_positive_int(
+                "PINTEREST_QUERIES_PER_CYCLE",
+                os.getenv("PINTEREST_QUERIES_PER_CYCLE", "2"),
+                2,
             ),
         )
+
+    @property
+    def admin_ids(self) -> frozenset[int]:
+        return frozenset({self.admin_telegram_id}).union(self.admin_telegram_ids)
 
     @property
     def timezone(self) -> tzinfo:

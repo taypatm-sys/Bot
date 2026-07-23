@@ -1592,6 +1592,7 @@ class MockupGenerator:
         reference_image_bytes: Optional[bytes] = None,
         reference_mime_type: Optional[str] = None,
         reference_tags: Optional[dict[str, object]] = None,
+        image_model: Optional[str] = None,
     ) -> GeneratedModelPhoto:
         try:
             return await asyncio.to_thread(
@@ -1606,6 +1607,7 @@ class MockupGenerator:
                 reference_image_bytes,
                 reference_mime_type,
                 reference_tags,
+                image_model,
             )
         except MockupGenerationError:
             raise
@@ -1625,6 +1627,7 @@ class MockupGenerator:
         reference_image_bytes: Optional[bytes] = None,
         reference_mime_type: Optional[str] = None,
         reference_tags: Optional[dict[str, object]] = None,
+        image_model: Optional[str] = None,
     ) -> GeneratedModelPhoto:
         source_detail_bytes = None
         if not print_image_bytes:
@@ -1676,7 +1679,7 @@ class MockupGenerator:
                 ]
             )
         response = self.client.models.generate_content(
-            model=self.image_model,
+            model=image_model or self.image_model,
             contents=contents,
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE"],

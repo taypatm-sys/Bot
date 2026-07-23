@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
 from app.analysis_coordinator import AnalysisCoordinator
+from app.bfl_generator import BflMockupGenerator
 from app.config import Config, ConfigError
 from app.copywriter import ImageCopywriter
 from app.handlers import build_router
@@ -54,6 +55,12 @@ async def main() -> None:
         image_size=config.gemini_image_size,
         analysis_coordinator=analysis_coordinator,
     )
+    economy_generator = BflMockupGenerator(
+        api_key=config.bfl_api_key,
+        model=config.bfl_economy_model,
+        api_base=config.bfl_api_base,
+        timeout_seconds=config.bfl_timeout_seconds,
+    )
     reference_catalog = ReferenceCatalog(
         repository=repository,
         api_key=config.gemini_api_key,
@@ -65,6 +72,12 @@ async def main() -> None:
         analysis_timeout_seconds=config.reference_analysis_timeout_seconds,
         user_agent=config.reference_user_agent,
         analysis_coordinator=analysis_coordinator,
+        pinterest_access_token=config.pinterest_access_token,
+        pinterest_search_enabled=config.pinterest_search_enabled,
+        pinterest_country_code=config.pinterest_country_code,
+        pinterest_search_interval_seconds=config.pinterest_search_interval_seconds,
+        pinterest_target_pool_size=config.pinterest_target_pool_size,
+        pinterest_queries_per_cycle=config.pinterest_queries_per_cycle,
     )
     added_references, total_seed_references = reference_catalog.seed_file(
         config.reference_sources_path
@@ -88,6 +101,7 @@ async def main() -> None:
             repository=repository,
             copywriter=copywriter,
             mockup_generator=mockup_generator,
+            economy_generator=economy_generator,
             reference_catalog=reference_catalog,
             publisher=publisher,
             template_store=template_store,
