@@ -227,9 +227,9 @@ def _box_from_response(
         raise MockupGeometryError(f"{label} has negative or empty coordinates")
 
     # Gemini occasionally ignores the requested percentage scale. Normalize a
-    # 0..1 box or a pixel box before validating it. Each box is detected
-    # separately because mixed responses, such as a percentage garment box and
-    # a pixel print box, have been observed in production.
+    # 0..1 box or a pixel box before validating it. It may also return right and
+    # bottom coordinates in the fields named width and height. Repair that common
+    # ambiguity locally instead of spending three more analysis requests.
     if max(values) <= 1.0:
         x *= 100.0
         y *= 100.0
@@ -240,14 +240,44 @@ def _box_from_response(
             raise MockupGeometryError(
                 f"{label} looks like pixels but the image size is unavailable"
             )
-        if x + width > image_width * 1.03 or y + height > image_height * 1.03:
+
+        x_overflow = x + width - image_width
+        y_overflow = y + height - image_height
+        if x_overflow > image_width * 0.05:
+            if width > x and width <= image_width * 1.15:
+                width -= x
+            else:
+                raise MockupGeometryError(f"{label} is outside the source image")
+        elif x_overflow > 0:
+            width = image_width - x
+
+        if y_overflow > image_height * 0.05:
+            if height > y and height <= image_height * 1.15:
+                height -= y
+            else:
+                raise MockupGeometryError(f"{label} is outside the source image")
+        elif y_overflow > 0:
+            height = image_height - y
+
+        if width <= 0 or height <= 0 or x >= image_width or y >= image_height:
             raise MockupGeometryError(f"{label} is outside the source image")
         x = x / image_width * 100.0
         width = width / image_width * 100.0
         y = y / image_height * 100.0
         height = height / image_height * 100.0
+    else:
+        x_overflow = x + width - 100.0
+        y_overflow = y + height - 100.0
+        if x_overflow > 2.0 and width > x and width <= 101.0:
+            width -= x
+        elif 0 < x_overflow <= 2.0:
+            width = 100.0 - x
+        if y_overflow > 2.0 and height > y and height <= 101.0:
+            height -= y
+        elif 0 < y_overflow <= 2.0:
+            height = 100.0 - y
 
-    tolerance = 1.0
+    tolerance = 2.0
     if x > 100.0 + tolerance or y > 100.0 + tolerance:
         raise MockupGeometryError(f"{label} starts outside the source image")
     if x + width > 100.0 + tolerance or y + height > 100.0 + tolerance:
@@ -1282,7 +1312,7 @@ class MockupGenerator:
             raise MockupAnalysisError(str(error)) from error
 
         last_error: Optional[Exception] = None
-        retry_delays = (0.0, 1.5, 4.0)
+        retry_delays = (0.0, 1.0)
         async with self._interactive_analysis_slot():
             for attempt, delay in enumerate(retry_delays, start=1):
                 if delay:

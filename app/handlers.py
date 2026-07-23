@@ -29,7 +29,7 @@ from app.formatting import (
     render_caption_text,
     split_product_title,
 )
-from app.generation_router import choose_generation_model
+from app.generation_router import GenerationDecision, choose_generation_model
 from app.models import ProductPreset, ScheduledPost
 from app.mockup_generator import (
     MockupAnalysisError,
@@ -157,9 +157,13 @@ def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Все верно - создать фото",
-                    callback_data="model:generate",
-                )
+                    text="Простой - бесплатно",
+                    callback_data="model:generate:local",
+                ),
+                InlineKeyboardButton(
+                    text="Сложный - Gemini",
+                    callback_data="model:generate:gemini",
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -284,8 +288,10 @@ def format_model_analysis(
         f"{geometry_text}\n"
         f"Источник принта: {print_source_text}\n"
         f"Отдельный PNG: {png_text}\n\n"
-        "Платная генерация еще не запускалась. Проверьте параметры и подтвердите "
-        "создание фото. Отдельный PNG можно добавить только при необходимости."
+        "Выберите способ создания фото:\n"
+        "Простой - локальная обработка без платной генерации.\n"
+        "Сложный - создание через Gemini.\n"
+        "Отдельный PNG можно добавить только при необходимости."
     )
 
 
@@ -703,6 +709,7 @@ def build_router(
         status_message: Message,
     ) -> None:
         data = await restore_model_draft(state, message.chat.id)
+        requested_generation_mode = data.get("model_generation_mode", "auto")
         source_file_id = data.get("model_source_file_id")
         source_mime_type = data.get("model_source_mime_type", "image/jpeg")
         if not source_file_id:
@@ -920,6 +927,31 @@ def build_router(
                     )
                     continue
 
+                if (
+                    requested_generation_mode == "local"
+                    and not compatibility.local_composite_safe
+                ):
+                    excluded_reference_ids.append(candidate.id)
+                    reference_replacements += 1
+                    repository.set_setting(
+                        "last_mockup_reference_replacements",
+                        str(reference_replacements),
+                    )
+                    preflight_reasons.append(
+                        f"#{candidate.id}: не подходит для простого режима"
+                    )
+                    repository.release_reference_reservation(
+                        candidate.id,
+                        candidate_token,
+                        outcome="rejected_local_mode",
+                    )
+                    logger.info(
+                        "Референс #%s отклонен для простого режима: %s",
+                        candidate.id,
+                        compatibility.reason,
+                    )
+                    continue
+
                 reference_asset = candidate
                 reference_compatibility = compatibility
                 usage_token = candidate_token
@@ -932,10 +964,16 @@ def build_router(
                     "last_mockup_status", "нет подходящего референса"
                 )
                 if generation_error is None:
-                    generation_error = (
-                        "Не найден референс с правильной стороной и открытой зоной "
-                        "принта. Платная генерация не запускалась."
-                    )
+                    if requested_generation_mode == "local":
+                        generation_error = (
+                            "Не найден референс, подходящий для простого режима. "
+                            "Попробуйте режим «Сложный - Gemini» или другой макет."
+                        )
+                    else:
+                        generation_error = (
+                            "Не найден референс с правильной стороной и открытой зоной "
+                            "принта. Генерация не запускалась."
+                        )
                 break
 
             if reference_compatibility is None:
@@ -947,12 +985,29 @@ def build_router(
                 generation_error = "Не сохранена проверка референса. Попробуйте еще раз."
                 break
 
-            generation_decision = choose_generation_model(
-                spec=spec,
-                has_separate_print=bool(print_bytes),
-                local_composite_safe=reference_compatibility.local_composite_safe,
-                gemini_lite_model=config.gemini_image_model,
-            )
+            if requested_generation_mode == "local":
+                generation_decision = GenerationDecision(
+                    tier="routine",
+                    provider="local",
+                    model="OpenCV local compositor",
+                    score=0,
+                    reasons=("пользователь выбрал простой режим",),
+                )
+            elif requested_generation_mode == "gemini":
+                generation_decision = GenerationDecision(
+                    tier="very_complex",
+                    provider="gemini",
+                    model=config.gemini_image_model,
+                    score=10,
+                    reasons=("пользователь выбрал сложный режим",),
+                )
+            else:
+                generation_decision = choose_generation_model(
+                    spec=spec,
+                    has_separate_print=bool(print_bytes),
+                    local_composite_safe=reference_compatibility.local_composite_safe,
+                    gemini_lite_model=config.gemini_image_model,
+                )
             repository.set_setting(
                 "last_mockup_provider", generation_decision.provider_label_ru
             )
@@ -1006,6 +1061,11 @@ def build_router(
                             **generator_kwargs
                         )
                     except LocalCompositeNeedsGemini as local_error:
+                        if requested_generation_mode == "local":
+                            raise MockupGenerationError(
+                                "Простой режим не смог создать качественный результат. "
+                                "Платная генерация не запускалась. Выберите «Сложный - Gemini»."
+                            ) from local_error
                         logger.info(
                             "Локальная обработка повышена до Gemini: %s",
                             local_error.user_message,
@@ -2083,7 +2143,9 @@ def build_router(
             reply_markup=model_analysis_keyboard(has_print=True),
         )
 
-    @router.callback_query(F.data == "model:generate")
+    @router.callback_query(
+        F.data.in_({"model:generate", "model:generate:local", "model:generate:gemini"})
+    )
     async def confirm_model_generation(
         callback: CallbackQuery,
         state: FSMContext,
@@ -2115,10 +2177,29 @@ def build_router(
         if await state.get_state() == DraftStates.generating_model_photos.state:
             await callback.answer("Фотография уже создается", show_alert=True)
             return
-        await callback.answer("Платная генерация запущена")
-        status_message = await callback.message.answer(
-            "Параметры подтверждены. Теперь запускаю одну платную генерацию 4:5."
-        )
+
+        if callback.data == "model:generate:local":
+            generation_mode = "local"
+            answer_text = "Запускаю простой режим"
+            status_text = (
+                "Параметры подтверждены. Запускаю локальную обработку без платной "
+                "генерации. Если качество не пройдет проверку, Gemini не запустится."
+            )
+        elif callback.data == "model:generate:gemini":
+            generation_mode = "gemini"
+            answer_text = "Запускаю Gemini"
+            status_text = (
+                "Параметры подтверждены. Запускаю создание фото через Gemini 4:5."
+            )
+        else:
+            generation_mode = "auto"
+            answer_text = "Запускаю создание фото"
+            status_text = "Параметры подтверждены. Запускаю создание фото 4:5."
+
+        await state.update_data(model_generation_mode=generation_mode)
+        await save_model_draft(state, callback.message.chat.id)
+        await callback.answer(answer_text)
+        status_message = await callback.message.answer(status_text)
         await generate_model_batch(
             message=callback.message,
             state=state,

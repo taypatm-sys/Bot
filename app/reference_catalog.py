@@ -153,8 +153,8 @@ class PlacementPoint(BaseModel):
 class PlacementBox(BaseModel):
     x: float = Field(ge=0, le=100)
     y: float = Field(ge=0, le=100)
-    width: float = Field(gt=0, le=100)
-    height: float = Field(gt=0, le=100)
+    width: float = Field(ge=0.01, le=100)
+    height: float = Field(ge=0.01, le=100)
 
 
 class ReferenceCompatibility(BaseModel):

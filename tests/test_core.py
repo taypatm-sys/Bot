@@ -48,10 +48,34 @@ from app.mockup_generator import (
     normalize_detected_mockup,
     prepare_analysis_image,
 )
-from app.reference_catalog import ReferenceCatalog, normalize_reference_urls
+from app.reference_catalog import (
+    ReferenceCatalog,
+    ReferenceCompatibility,
+    normalize_reference_urls,
+)
 from app.scheduling import parse_local_datetime
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
+
+
+class SchemaCompatibilityTests(unittest.TestCase):
+    def test_reference_schema_has_no_exclusive_minimum(self) -> None:
+        schema_text = str(ReferenceCompatibility.model_json_schema())
+        self.assertNotIn("exclusiveMinimum", schema_text)
+
+    def test_pixel_box_overflow_is_repaired(self) -> None:
+        from app.mockup_generator import _box_from_response
+
+        box = _box_from_response(
+            _ResponseBox(x=220, y=180, width=1100, height=1180),
+            label="garment_panel_box",
+            image_width=1280,
+            image_height=1280,
+            minimum_width=10,
+            minimum_height=10,
+        )
+        self.assertLessEqual(box.x + box.width, 100)
+        self.assertLessEqual(box.y + box.height, 100)
 
 
 class FormattingTests(unittest.TestCase):
