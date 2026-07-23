@@ -73,6 +73,7 @@ async def main() -> None:
         pinterest_search_interval_seconds=config.pinterest_search_interval_seconds,
         pinterest_target_pool_size=config.pinterest_target_pool_size,
         pinterest_queries_per_cycle=config.pinterest_queries_per_cycle,
+        local_generator=local_generator,
     )
     added_references, total_seed_references = reference_catalog.seed_file(
         config.reference_sources_path
