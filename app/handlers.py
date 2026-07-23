@@ -861,6 +861,9 @@ def build_router(
                 if candidate is None:
                     break
                 try:
+                    repository.set_setting(
+                        "last_mockup_preflight_mode", "Gemini vision"
+                    )
                     compatibility = await asyncio.wait_for(
                         reference_catalog.validate_reference_for_generation(
                             image_bytes=candidate.image_bytes,
@@ -877,20 +880,23 @@ def build_router(
                     )
                 except Exception as error:
                     logger.warning(
-                        "Не удалось проверить референс #%s: %s",
+                        "Gemini preflight для референса #%s недоступен: %s. "
+                        "Используется локальная проверка по сохраненным тегам.",
                         candidate.id,
                         error,
                     )
-                    repository.release_reference_reservation(
-                        candidate.id,
-                        candidate_token,
-                        outcome="preflight_error",
+                    compatibility = reference_catalog.fallback_reference_compatibility(
+                        asset=candidate,
+                        garment_type=spec.garment_type,
+                        print_side=spec.side,
+                        target_shirt_color=spec.shirt_color,
+                        print_width_percent=spec.print_width_percent,
+                        print_height_percent=spec.print_height_percent,
+                        print_top_offset_percent=spec.print_top_offset_percent,
                     )
-                    generation_error = (
-                        "Не удалось безопасно проверить референс. Платная генерация "
-                        "не запускалась. Попробуйте еще раз."
+                    repository.set_setting(
+                        "last_mockup_preflight_mode", "локальная резервная проверка"
                     )
-                    break
 
                 if not compatibility.compatible:
                     excluded_reference_ids.append(candidate.id)
@@ -1163,6 +1169,7 @@ def build_router(
                 f"Автозамен до запуска: {last_reference_replacements}\n"
                 f"Последний провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
                 f"Последняя модель: {repository.get_setting('last_mockup_model') or 'еще не запускалось'}\n"
+                f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
                 f"Сложность: {repository.get_setting('last_mockup_complexity') or 'еще не определялась'}\n"
                 f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
                 f"Найдено по последнему товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
@@ -1264,6 +1271,7 @@ def build_router(
                 f"Автозамен: {replacements}\n"
                 f"Провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
                 f"Модель: {repository.get_setting('last_mockup_model') or 'еще не запускалась'}\n"
+                f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
                 f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
                 f"Найдено по товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
                 f"Референс использован: {last_reference_passed}\n"

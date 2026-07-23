@@ -17,6 +17,7 @@ import aiohttp
 from google import genai
 from google.genai import types
 from PIL import Image, ImageOps, UnidentifiedImageError
+import numpy as np
 from pydantic import BaseModel, Field
 
 from app.analysis_coordinator import AnalysisCoordinator
@@ -939,6 +940,208 @@ class ReferenceCatalog:
             ):
                 return asset
         return None
+
+    def fallback_reference_compatibility(
+        self,
+        *,
+        asset: ReferenceAsset,
+        garment_type: GarmentTag,
+        print_side: Literal["front", "back"],
+        target_shirt_color: str = "",
+        print_width_percent: int = 30,
+        print_height_percent: int = 30,
+        print_top_offset_percent: int = 15,
+    ) -> ReferenceCompatibility:
+        """Build a conservative preflight from the tags already stored for a reference.
+
+        This is used when the optional Gemini vision preflight is unavailable. It
+        never approves a clearly incompatible side or camera angle. Local compositing
+        is enabled only for plain, close, high-visibility t-shirts with a matching
+        estimated garment color. Other compatible references remain usable by Gemini.
+        """
+        tags = asset.tags or {}
+        visible_side = str(tags.get("print_side_visible", "unclear"))
+        if visible_side not in {"front", "back", "both", "cap-front", "unclear"}:
+            visible_side = "unclear"
+        camera_angle = str(tags.get("camera_angle", "unclear"))
+        if camera_angle not in {
+            "front", "rear", "three-quarter", "side", "high", "low", "mirror", "unclear"
+        }:
+            camera_angle = "unclear"
+        visibility = max(0, min(100, int(tags.get("print_area_visibility", 0) or 0)))
+        framing = str(tags.get("framing", ""))
+
+        side_ok = (
+            visible_side in {"back", "both"}
+            if print_side == "back"
+            else visible_side in {"front", "both", "cap-front"}
+        )
+        angle_ok = (
+            camera_angle in {"rear", "three-quarter"}
+            if print_side == "back"
+            else camera_angle not in {"rear", "side", "unclear"}
+        )
+        compatible = bool(tags.get("usable", True)) and side_ok and angle_ok and visibility >= 75
+
+        torso = self._fallback_torso_box(framing=framing, camera_angle=camera_angle)
+        target_box = self._fallback_print_box(
+            torso=torso,
+            print_width_percent=print_width_percent,
+            print_height_percent=print_height_percent,
+            print_top_offset_percent=print_top_offset_percent,
+        )
+        garment_color_match = self._fallback_color_match(
+            image_bytes=asset.image_bytes,
+            target_color=target_shirt_color,
+            torso=torso,
+        )
+        existing_coverage = max(
+            0, min(100, int(tags.get("existing_print_coverage_percent", 0) or 0))
+        )
+        existing_coverable = bool(tags.get("garment_is_plain", False)) or existing_coverage <= 12
+        local_angle_ok = camera_angle in {"front", "rear"}
+        local_framing_ok = framing in {"detail", "close-up", "waist-up"}
+        local_safe = (
+            compatible
+            and garment_type == "t-shirt"
+            and visibility >= 88
+            and local_angle_ok
+            and local_framing_ok
+            and garment_color_match
+            and existing_coverable
+            and target_box is not None
+        )
+
+        if not compatible:
+            reason = "Сохраненные теги показывают неподходящую сторону, ракурс или видимость"
+        elif local_safe:
+            reason = "Проверено локально по сохраненным тегам и цвету изделия"
+        else:
+            reason = "Референс подходит для Gemini, но локальная замена требует осторожности"
+
+        return ReferenceCompatibility(
+            compatible=compatible,
+            visible_side=visible_side,
+            camera_angle=camera_angle,
+            print_area_visibility=visibility,
+            target_print_box=target_box,
+            target_print_quad=[],
+            garment_color_match=garment_color_match,
+            existing_print_coverable=existing_coverable,
+            local_composite_safe=local_safe,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _fallback_torso_box(*, framing: str, camera_angle: str) -> PlacementBox:
+        presets = {
+            "detail": (15.0, 18.0, 70.0, 66.0),
+            "close-up": (17.0, 25.0, 66.0, 58.0),
+            "waist-up": (20.0, 29.0, 60.0, 54.0),
+            "three-quarter": (25.0, 25.0, 50.0, 47.0),
+            "full-body": (34.0, 23.0, 32.0, 35.0),
+        }
+        x, y, width, height = presets.get(framing, presets["waist-up"])
+        if camera_angle == "three-quarter":
+            width *= 0.92
+        return PlacementBox(x=x, y=y, width=width, height=height)
+
+    @staticmethod
+    def _fallback_print_box(
+        *,
+        torso: PlacementBox,
+        print_width_percent: int,
+        print_height_percent: int,
+        print_top_offset_percent: int,
+    ) -> PlacementBox:
+        width = max(5.0, min(torso.width * 0.92, torso.width * print_width_percent / 100.0))
+        height = max(5.0, min(torso.height * 0.78, torso.height * print_height_percent / 100.0))
+        x = torso.x + (torso.width - width) / 2.0
+        y = torso.y + torso.height * max(0, min(60, print_top_offset_percent)) / 100.0
+        if y + height > torso.y + torso.height:
+            y = torso.y + torso.height - height
+        return PlacementBox(
+            x=max(0.0, min(99.0, x)),
+            y=max(0.0, min(99.0, y)),
+            width=max(1.0, min(100.0 - x, width)),
+            height=max(1.0, min(100.0 - y, height)),
+        )
+
+    @classmethod
+    def _fallback_color_match(
+        cls,
+        *,
+        image_bytes: bytes,
+        target_color: str,
+        torso: PlacementBox,
+    ) -> bool:
+        target = cls._color_family_from_name(target_color)
+        if target == "unknown":
+            return False
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                rgb = ImageOps.exif_transpose(image).convert("RGB")
+                width, height = rgb.size
+                x0 = int(width * torso.x / 100.0)
+                y0 = int(height * torso.y / 100.0)
+                x1 = int(width * (torso.x + torso.width) / 100.0)
+                y1 = int(height * (torso.y + torso.height) / 100.0)
+                crop = rgb.crop((x0, y0, max(x0 + 1, x1), max(y0 + 1, y1))).resize((48, 48))
+                pixels = np.asarray(crop, dtype=np.float32).reshape(-1, 3)
+        except (UnidentifiedImageError, OSError, ValueError):
+            return False
+        median = np.median(pixels, axis=0)
+        observed = cls._color_family_from_rgb(float(median[0]), float(median[1]), float(median[2]))
+        if target == observed:
+            return True
+        return {target, observed} <= {"black", "gray"} or {target, observed} <= {"white", "beige"}
+
+    @staticmethod
+    def _color_family_from_name(value: str) -> str:
+        clean = value.casefold()
+        groups = (
+            ("black", ("black", "charcoal", "dark grey", "dark gray", "черн", "gara")),
+            ("white", ("white", "бел", "ak ", "ak")),
+            ("gray", ("grey", "gray", "сер", "silver")),
+            ("beige", ("beige", "cream", "sand", "tan", "беж", "крем")),
+            ("red", ("red", "burgundy", "maroon", "крас", "борд")),
+            ("blue", ("blue", "navy", "cyan", "син", "голуб")),
+            ("green", ("green", "khaki", "olive", "зел", "хаки")),
+            ("pink", ("pink", "rose", "роз")),
+            ("brown", ("brown", "chocolate", "корич")),
+        )
+        for family, words in groups:
+            if any(word in clean for word in words):
+                return family
+        return "unknown"
+
+    @staticmethod
+    def _color_family_from_rgb(red: float, green: float, blue: float) -> str:
+        high = max(red, green, blue)
+        low = min(red, green, blue)
+        spread = high - low
+        light = (red + green + blue) / 3.0
+        if light < 58:
+            return "black"
+        if light > 215 and spread < 28:
+            return "white"
+        if spread < 30:
+            return "gray"
+        if red > 175 and green > 145 and blue < 135:
+            return "beige"
+        if red > green * 1.18 and red > blue * 1.18:
+            if blue > 120 and light > 155:
+                return "pink"
+            if light < 135 and green > blue:
+                return "brown"
+            return "red"
+        if blue > red * 1.12 and blue > green * 1.05:
+            return "blue"
+        if green > red * 1.08 and green > blue * 1.05:
+            return "green"
+        if red > green > blue and light < 155:
+            return "brown"
+        return "unknown"
 
     async def validate_reference_for_generation(
         self,
