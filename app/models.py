@@ -63,3 +63,10 @@ class ReferenceAsset:
     simple_ready: bool = False
     simple_status: str = "pending"
     simple_reason: str = ""
+    lifecycle_state: str = "raw"
+    simple_level: str = "C"
+    simple_quality_score: int = 0
+    last_match_score: int = 0
+    last_match_reason: str = ""
+    success_count: int = 0
+    failure_count: int = 0

@@ -129,6 +129,13 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
         simple_ready=bool(row["simple_ready"] if "simple_ready" in row_keys else 0),
         simple_status=str((row["simple_status"] if "simple_status" in row_keys else None) or "pending"),
         simple_reason=str((row["simple_reason"] if "simple_reason" in row_keys else None) or ""),
+        lifecycle_state=str((row["lifecycle_state"] if "lifecycle_state" in row_keys else None) or "raw"),
+        simple_level=str((row["simple_level"] if "simple_level" in row_keys else None) or "C"),
+        simple_quality_score=int((row["simple_quality_score"] if "simple_quality_score" in row_keys else 0) or 0),
+        last_match_score=int((row["last_match_score"] if "last_match_score" in row_keys else 0) or 0),
+        last_match_reason=str((row["last_match_reason"] if "last_match_reason" in row_keys else None) or ""),
+        success_count=int((row["success_count"] if "success_count" in row_keys else 0) or 0),
+        failure_count=int((row["failure_count"] if "failure_count" in row_keys else 0) or 0),
     )
 
 
@@ -249,6 +256,13 @@ class PostRepository:
                     simple_ready INTEGER NOT NULL DEFAULT 0,
                     simple_status TEXT NOT NULL DEFAULT 'pending',
                     simple_reason TEXT NOT NULL DEFAULT '',
+                    lifecycle_state TEXT NOT NULL DEFAULT 'raw',
+                    simple_level TEXT NOT NULL DEFAULT 'C',
+                    simple_quality_score INTEGER NOT NULL DEFAULT 0,
+                    last_match_score INTEGER NOT NULL DEFAULT 0,
+                    last_match_reason TEXT NOT NULL DEFAULT '',
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
                     width INTEGER,
                     height INTEGER,
                     image_sha256 TEXT,
@@ -382,6 +396,13 @@ class PostRepository:
             "simple_ready": "INTEGER NOT NULL DEFAULT 0",
             "simple_status": "TEXT NOT NULL DEFAULT 'pending'",
             "simple_reason": "TEXT NOT NULL DEFAULT ''",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'raw'",
+            "simple_level": "TEXT NOT NULL DEFAULT 'C'",
+            "simple_quality_score": "INTEGER NOT NULL DEFAULT 0",
+            "last_match_score": "INTEGER NOT NULL DEFAULT 0",
+            "last_match_reason": "TEXT NOT NULL DEFAULT ''",
+            "success_count": "INTEGER NOT NULL DEFAULT 0",
+            "failure_count": "INTEGER NOT NULL DEFAULT 0",
         }
         if self.database_url:
             for name, definition in definitions.items():
@@ -398,6 +419,7 @@ class PostRepository:
                   AND COALESCE(simple_status, '') = ''
                 """,
             )
+            self._backfill_reference_lifecycle(connection)
             return
 
         columns = {
@@ -410,6 +432,31 @@ class PostRepository:
                     connection,
                     f"ALTER TABLE reference_assets ADD COLUMN {name} {definition}",
                 )
+        self._backfill_reference_lifecycle(connection)
+
+    def _backfill_reference_lifecycle(self, connection: Any) -> None:
+        self._execute(
+            connection,
+            """
+            UPDATE reference_assets
+            SET lifecycle_state = CASE
+                    WHEN success_count > 0 THEN 'successful'
+                    WHEN last_match_score > 0 THEN 'matched'
+                    WHEN simple_ready = 1 THEN 'prepared'
+                    ELSE COALESCE(NULLIF(lifecycle_state, ''), 'raw')
+                END,
+                simple_level = CASE
+                    WHEN simple_ready = 1 AND simple_reason LIKE '%чистая%' THEN 'A'
+                    WHEN simple_ready = 1 THEN 'B'
+                    WHEN simple_status = 'skipped' THEN 'C'
+                    ELSE COALESCE(NULLIF(simple_level, ''), 'C')
+                END,
+                simple_quality_score = CASE
+                    WHEN simple_ready = 1 AND simple_quality_score = 0 THEN 88
+                    ELSE simple_quality_score
+                END
+            """,
+        )
 
     def close(self) -> None:
         if self._pool is not None:
@@ -697,7 +744,7 @@ class PostRepository:
                 connection,
                 """
                 UPDATE reference_assets
-                SET tags_json = ?, status = ?, last_error = ?,
+                SET tags_json = ?, status = ?, last_error = ?, lifecycle_state = 'raw',
                     simple_status = CASE WHEN ? THEN 'pending' ELSE 'skipped' END,
                     simple_ready = 0, simple_reason = '',
                     next_retry_at_utc = NULL, updated_at_utc = ?
@@ -787,6 +834,8 @@ class PostRepository:
         thumbnail_bytes: Optional[bytes],
         ready: bool,
         reason: str = "",
+        level: str = "C",
+        quality_score: int = 0,
     ) -> None:
         now = _iso(datetime.now(UTC))
         with self._connect() as connection:
@@ -796,7 +845,10 @@ class PostRepository:
                 UPDATE reference_assets
                 SET simple_image_bytes = ?, simple_image_mime_type = ?,
                     simple_thumbnail_bytes = ?, simple_ready = ?,
-                    simple_status = ?, simple_reason = ?, updated_at_utc = ?
+                    simple_status = ?, simple_reason = ?, simple_level = ?,
+                    simple_quality_score = ?,
+                    lifecycle_state = CASE WHEN ? THEN 'prepared' ELSE lifecycle_state END,
+                    updated_at_utc = ?
                 WHERE id = ?
                 """,
                 (
@@ -806,6 +858,9 @@ class PostRepository:
                     1 if ready else 0,
                     "ready" if ready else "skipped",
                     reason[:1000],
+                    (level or "C")[:1].upper(),
+                    max(0, min(100, int(quality_score))),
+                    1 if ready else 0,
                     now,
                     reference_id,
                 ),
@@ -1030,7 +1085,7 @@ class PostRepository:
                 """
                 UPDATE reference_assets
                 SET use_count = use_count + 1, last_used_at_utc = ?,
-                    cooldown_until_utc = ?, updated_at_utc = ?
+                    cooldown_until_utc = ?, lifecycle_state = 'matched', updated_at_utc = ?
                 WHERE id = ? AND status = 'ready'
                   AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?)
                 """,
@@ -1102,6 +1157,127 @@ class PostRepository:
                 """,
                 (now, reference_id),
             )
+
+    def list_reference_assets(self, *, limit: int = 100, offset: int = 0) -> list[ReferenceAsset]:
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM reference_assets
+                ORDER BY
+                    CASE lifecycle_state
+                        WHEN 'successful' THEN 0
+                        WHEN 'matched' THEN 1
+                        WHEN 'prepared' THEN 2
+                        ELSE 3
+                    END,
+                    simple_quality_score DESC,
+                    success_count DESC,
+                    id ASC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, limit), max(0, offset)),
+            ).fetchall()
+        return [_row_to_reference_asset(row) for row in rows]
+
+    def update_reference_match(self, reference_id: int, *, score: int, reason: str) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET last_match_score = ?, last_match_reason = ?,
+                    lifecycle_state = 'matched', updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (max(0, min(100, int(score))), reason[:1000], now, reference_id),
+            )
+
+    def record_reference_result(
+        self,
+        reference_id: int,
+        *,
+        success: bool,
+        match_score: int = 0,
+        reason: str = "",
+    ) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            if success:
+                self._execute(
+                    connection,
+                    """
+                    UPDATE reference_assets
+                    SET success_count = success_count + 1,
+                        lifecycle_state = 'successful',
+                        last_match_score = CASE WHEN ? > 0 THEN ? ELSE last_match_score END,
+                        last_match_reason = CASE WHEN ? <> '' THEN ? ELSE last_match_reason END,
+                        updated_at_utc = ?
+                    WHERE id = ?
+                    """,
+                    (match_score, match_score, reason, reason[:1000], now, reference_id),
+                )
+            else:
+                self._execute(
+                    connection,
+                    """
+                    UPDATE reference_assets
+                    SET failure_count = failure_count + 1,
+                        last_match_score = CASE WHEN ? > 0 THEN ? ELSE last_match_score END,
+                        last_match_reason = CASE WHEN ? <> '' THEN ? ELSE last_match_reason END,
+                        updated_at_utc = ?
+                    WHERE id = ?
+                    """,
+                    (match_score, match_score, reason, reason[:1000], now, reference_id),
+                )
+
+    def delete_reference_asset(self, reference_id: int) -> bool:
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "DELETE FROM reference_usages WHERE reference_id = ?",
+                (reference_id,),
+            )
+            cursor = self._execute(
+                connection,
+                "DELETE FROM reference_assets WHERE id = ?",
+                (reference_id,),
+            )
+        return bool(cursor.rowcount)
+
+    def reset_simple_reference(self, reference_id: int) -> bool:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'pending', simple_reason = '', simple_ready = 0,
+                    simple_image_bytes = NULL, simple_image_mime_type = NULL,
+                    simple_thumbnail_bytes = NULL, lifecycle_state = 'raw',
+                    updated_at_utc = ?
+                WHERE id = ? AND status = 'ready'
+                """,
+                (now, reference_id),
+            )
+        return bool(cursor.rowcount)
+
+    def reset_simple_reference_queue(self, *, include_skipped: bool = True) -> int:
+        now = _iso(datetime.now(UTC))
+        statuses = "('pending', 'skipped')" if include_skipped else "('pending')"
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                f"""
+                UPDATE reference_assets
+                SET simple_status = 'pending', simple_reason = '',
+                    simple_ready = 0, lifecycle_state = 'raw', updated_at_utc = ?
+                WHERE status = 'ready' AND simple_status IN {statuses}
+                """,
+                (now,),
+            )
+        return int(cursor.rowcount or 0)
 
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
         if self.get_setting("presets_seeded") == "1":

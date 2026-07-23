@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Literal, Optional, Sequence
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote_plus, urlparse, urlunparse
 
 import aiohttp
 from google import genai
@@ -386,6 +386,17 @@ class ReferenceCatalog:
             self._wake_event.set()
         return counts
 
+    def prepare_all_simple(self) -> int:
+        count = self.repository.reset_simple_reference_queue(include_skipped=True)
+        self._wake_event.set()
+        return count
+
+    def prepare_simple_reference(self, reference_id: int) -> bool:
+        queued = self.repository.reset_simple_reference(reference_id)
+        if queued:
+            self._wake_event.set()
+        return queued
+
     async def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
@@ -458,6 +469,45 @@ class ReferenceCatalog:
                 ]
             )
         )
+
+    def build_product_search_links(
+        self,
+        *,
+        garment_type: GarmentTag,
+        target_gender: Literal["women", "men", "unisex"],
+        moods: Sequence[MoodTag],
+        print_side: Literal["front", "back"],
+        shirt_color: str = "",
+        fit: str = "",
+        limit: int = 4,
+    ) -> list[tuple[str, str, str]]:
+        """Build human-openable Pinterest searches without using the API.
+
+        The bot does not crawl Pinterest. It only creates normal search URLs that
+        an administrator can open, choose suitable Pins from, and send back to
+        the bot for automatic import and preparation.
+        """
+        queries = self.build_product_search_queries(
+            garment_type=garment_type,
+            target_gender=target_gender,
+            moods=moods,
+            print_side=print_side,
+            shirt_color=shirt_color,
+            fit=fit,
+        )
+        side_label = "спереди" if print_side == "front" else "сзади"
+        links: list[tuple[str, str, str]] = []
+        for index, query in enumerate(queries[: max(1, min(limit, 6))], start=1):
+            url = f"https://www.pinterest.com/search/pins/?q={quote_plus(query)}"
+            label = f"Поиск {index}: {side_label}"
+            links.append((label, query, url))
+        self.repository.set_setting(
+            "pinterest_last_product_queries", " || ".join(queries)[:1500]
+        )
+        self.repository.set_setting(
+            "pinterest_discovery_status", "поисковые ссылки готовы, API не используется"
+        )
+        return links
 
     async def discover_for_product(
         self,
@@ -771,6 +821,8 @@ class ReferenceCatalog:
                     thumbnail_bytes=None,
                     ready=False,
                     reason=preparation.reason,
+                    level="C",
+                    quality_score=max(0, min(100, int(preparation.print_area_visibility))),
                 )
                 logger.info(
                     "Референс #%s не подготовлен для простого режима: %s",
@@ -799,6 +851,15 @@ class ReferenceCatalog:
                     if preparation.existing_print_present
                     else "чистая зона принта готова"
                 ),
+                level=("B" if preparation.existing_print_present else "A"),
+                quality_score=max(
+                    0,
+                    min(
+                        100,
+                        int(preparation.print_area_visibility)
+                        - (8 if preparation.existing_print_present else 0),
+                    ),
+                ),
             )
             logger.info(
                 "Референс #%s подготовлен для простого режима", asset.id
@@ -812,6 +873,8 @@ class ReferenceCatalog:
                 thumbnail_bytes=None,
                 ready=False,
                 reason=str(error),
+                level="C",
+                quality_score=0,
             )
             logger.info(
                 "Референс #%s пропущен для простого режима: %s",
@@ -827,6 +890,8 @@ class ReferenceCatalog:
                 thumbnail_bytes=None,
                 ready=False,
                 reason=f"Ошибка подготовки: {str(error)[:220]}",
+                level="C",
+                quality_score=0,
             )
             logger.warning(
                 "Ошибка подготовки референса #%s для простого режима: %s",
@@ -1062,11 +1127,13 @@ class ReferenceCatalog:
         exclude_ids: Sequence[int] = (),
         preferred_source_name: str = "",
         simple_only: bool = False,
+        shirt_color: str = "",
+        fit: str = "",
         rng: Optional[random.Random] = None,
     ) -> Optional[ReferenceAsset]:
         excluded = set(exclude_ids)
         mood_set = set(moods)
-        scored: list[tuple[float, ReferenceAsset]] = []
+        scored: list[tuple[float, ReferenceAsset, list[str]]] = []
         for asset in self.repository.list_ready_reference_assets():
             if asset.id in excluded:
                 continue
@@ -1125,27 +1192,20 @@ class ReferenceCatalog:
             if any(word in notes for word in ("crowd", "busy", "group", "many people")):
                 crowd_penalty = 60
 
-            score = 100.0 + visibility * 0.35
-            score += 35 if gender == target_gender else 10
-            score += 22 * len(mood_set.intersection(tags.get("moods", [])))
-            score += framing_score
-            if bool(tags.get("garment_is_plain", False)):
-                score += 85
-            else:
-                existing_coverage = int(
-                    tags.get("existing_print_coverage_percent", 0) or 0
-                )
-                # Printed references remain usable when the garment color, side and
-                # panel are suitable. Plain garments are still strongly preferred.
-                score -= min(24, int(existing_coverage * 0.45))
-            score -= crowd_penalty
-            if season and tags.get("season") in {season, "all-season"}:
-                score += 12
+            score, score_reasons = self.score_reference(
+                asset=asset,
+                garment_type=garment_type,
+                target_gender=target_gender,
+                moods=moods,
+                print_side=print_side,
+                shirt_color=shirt_color,
+                fit=fit,
+                season=season,
+            )
+            score -= min(15, asset.use_count * 2)
             if preferred_source_name and asset.source_name == preferred_source_name:
-                score += 80
-
-            score -= asset.use_count * 3
-            scored.append((score, asset))
+                score = min(100, score + 8)
+            scored.append((float(score), asset, score_reasons))
         if not scored:
             return None
         scored.sort(key=lambda item: (-item[0], item[1].use_count, item[1].id))
@@ -1156,7 +1216,7 @@ class ReferenceCatalog:
             near_equal = [item for item in candidates if top_score - item[0] <= 4]
             rng.shuffle(near_equal)
             candidates = near_equal + [item for item in candidates if item not in near_equal]
-        for _, asset in candidates:
+        for score, asset, score_reasons in candidates:
             if self.repository.reserve_reference(
                 asset.id,
                 request_token=token,
@@ -1164,8 +1224,114 @@ class ReferenceCatalog:
                 target_gender=target_gender,
                 moods=list(moods),
             ):
-                return asset
+                self.repository.update_reference_match(
+                    asset.id,
+                    score=int(round(score)),
+                    reason="; ".join(score_reasons),
+                )
+                refreshed = self.repository.get_reference_asset(asset.id)
+                return refreshed or asset
         return None
+
+    def score_reference(
+        self,
+        *,
+        asset: ReferenceAsset,
+        garment_type: GarmentTag,
+        target_gender: Literal["women", "men", "unisex"],
+        moods: Sequence[MoodTag],
+        print_side: Optional[Literal["front", "back"]] = None,
+        shirt_color: str = "",
+        fit: str = "",
+        season: Optional[Literal["warm", "cold", "all-season"]] = None,
+    ) -> tuple[int, list[str]]:
+        tags = asset.tags or {}
+        score = 0
+        reasons: list[str] = []
+        garments = set(tags.get("garment_types", []))
+        if garment_type in garments:
+            score += 20
+            reasons.append("тип изделия совпадает")
+        gender = str(tags.get("gender", "unisex"))
+        if target_gender == "unisex" or gender == target_gender:
+            score += 10
+            reasons.append("категория модели совпадает")
+        elif gender == "unisex":
+            score += 7
+            reasons.append("унисекс референс")
+
+        visible_side = str(tags.get("print_side_visible", "unclear"))
+        side_ok = (
+            print_side is None
+            or visible_side == "both"
+            or (print_side == "front" and visible_side in {"front", "cap-front"})
+            or (print_side == "back" and visible_side == "back")
+        )
+        if side_ok:
+            score += 20
+            reasons.append("сторона принта совпадает")
+
+        visibility = max(0, min(100, int(tags.get("print_area_visibility", 0) or 0)))
+        score += round(visibility * 0.20)
+        reasons.append(f"видимость зоны {visibility}%")
+
+        framing = str(tags.get("framing", ""))
+        framing_points = {
+            "close-up": 10,
+            "waist-up": 10,
+            "detail": 8,
+            "three-quarter": 6,
+            "full-body": 2,
+        }.get(framing, 4)
+        score += framing_points
+        if framing_points >= 8:
+            reasons.append("подходящее кадрирование")
+
+        mood_matches = len(set(moods).intersection(tags.get("moods", [])))
+        score += min(10, mood_matches * 5)
+        if mood_matches:
+            reasons.append("настроение совпадает")
+
+        if asset.simple_ready:
+            score += 10
+            reasons.append(f"подготовлен для простого режима, уровень {asset.simple_level}")
+        elif bool(tags.get("garment_is_plain", False)):
+            score += 8
+            reasons.append("чистая зона изделия")
+        else:
+            coverage = max(0, min(100, int(tags.get("existing_print_coverage_percent", 0) or 0)))
+            score -= min(10, round(coverage / 4))
+            if coverage:
+                reasons.append(f"чужой принт занимает {coverage}%")
+
+        if season and tags.get("season") in {season, "all-season"}:
+            score += 4
+        if shirt_color:
+            try:
+                color_match = self._fallback_color_match(
+                    image_bytes=asset.simple_image_bytes or asset.image_bytes,
+                    target_color=shirt_color,
+                    torso=self._fallback_torso_box(
+                        framing=str(tags.get("framing", "waist-up")),
+                        camera_angle=str(tags.get("camera_angle", "front")),
+                    ),
+                )
+            except Exception:
+                color_match = False
+            if color_match:
+                score += 5
+                reasons.append("цвет близок к макету")
+        if fit and fit.casefold() in str(tags.get("composition_notes", "")).casefold():
+            score += 3
+            reasons.append("крой похож")
+
+        learning = min(10, asset.success_count * 3) - min(10, asset.failure_count * 2)
+        score += learning
+        if asset.success_count:
+            reasons.append(f"успешных применений: {asset.success_count}")
+        if asset.failure_count:
+            reasons.append(f"неудачных применений: {asset.failure_count}")
+        return max(0, min(100, int(round(score)))), reasons
 
     def fallback_reference_compatibility(
         self,
@@ -1549,6 +1715,13 @@ class ReferenceCatalog:
         simple_stats = self.repository.simple_reference_stats()
         queue_details = self.repository.reference_queue_details()
         assets = self.repository.list_ready_reference_assets()
+        all_assets = self.repository.list_reference_assets(limit=1000)
+        lifecycle: Counter[str] = Counter(asset.lifecycle_state for asset in all_assets)
+        levels: Counter[str] = Counter(
+            asset.simple_level
+            for asset in all_assets
+            if asset.simple_status in {"ready", "skipped"}
+        )
         garments: Counter[str] = Counter()
         genders: Counter[str] = Counter()
         for asset in assets:
@@ -1610,7 +1783,14 @@ class ReferenceCatalog:
             f"Всего ссылок: {stats.get('total', 0)}\n"
             f"Готово: {stats.get('ready', 0)}\n"
             f"Для простого режима: {simple_stats.get('ready', 0)} готово, "
-            f"{simple_stats.get('pending', 0) + simple_stats.get('processing', 0)} готовится\n"
+            f"{simple_stats.get('pending', 0) + simple_stats.get('processing', 0)} готовится, "
+            f"{simple_stats.get('skipped', 0)} отклонено\n"
+            f"Состояния: RAW {lifecycle.get('raw', 0)}, "
+            f"PREPARED {lifecycle.get('prepared', 0)}, "
+            f"MATCHED {lifecycle.get('matched', 0)}, "
+            f"SUCCESSFUL {lifecycle.get('successful', 0)}\n"
+            f"Уровни простого режима: A {levels.get('A', 0)}, "
+            f"B {levels.get('B', 0)}, C {levels.get('C', 0)}\n"
             + "\n".join(waiting_lines)
             + "\n"
             f"Не подходят: {stats.get('disabled', 0)}\n"
@@ -1620,6 +1800,6 @@ class ReferenceCatalog:
             f"мужчины {genders.get('men', 0)}, унисекс {genders.get('unisex', 0)}\n\n"
             f"Цель: минимум {self.min_pool_size} доступных фото для каждой "
             "используемой категории.\n"
-            f"Автопоиск Pinterest: "
+            f"Поиск референсов: "
             f"{self.repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}"
         )
