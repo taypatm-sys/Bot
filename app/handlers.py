@@ -969,7 +969,13 @@ def build_router(
             repository.set_setting("last_mockup_reference_count", "1")
             repository.set_setting("last_mockup_status", "генерация")
             if generation_decision.provider == "local":
-                process_text = "локально, без платной генерации"
+                if reference_compatibility.existing_print_present:
+                    process_text = (
+                        "локально: удаляю старый принт и ставлю новый, "
+                        "без платной генерации"
+                    )
+                else:
+                    process_text = "локально, без платной генерации"
             else:
                 process_text = f"через {generation_decision.model}"
             await status_message.edit_text(

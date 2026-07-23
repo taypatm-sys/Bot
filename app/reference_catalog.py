@@ -174,7 +174,12 @@ class ReferenceCompatibility(BaseModel):
     target_print_box: Optional[PlacementBox] = None
     target_print_quad: list[PlacementPoint] = Field(default_factory=list, max_length=4)
     garment_color_match: bool = False
+    existing_print_present: bool = False
+    existing_print_box: Optional[PlacementBox] = None
+    existing_print_quad: list[PlacementPoint] = Field(default_factory=list, max_length=4)
+    existing_print_coverage_percent: int = Field(default=0, ge=0, le=100)
     existing_print_coverable: bool = False
+    fabric_reconstruction_safe: bool = False
     local_composite_safe: bool = False
     reason: str = Field(min_length=1, max_length=240)
 
@@ -911,7 +916,12 @@ class ReferenceCatalog:
             if bool(tags.get("garment_is_plain", False)):
                 score += 85
             else:
-                score -= min(45, int(tags.get("existing_print_coverage_percent", 0) or 0))
+                existing_coverage = int(
+                    tags.get("existing_print_coverage_percent", 0) or 0
+                )
+                # Printed references remain usable when the garment color, side and
+                # panel are suitable. Plain garments are still strongly preferred.
+                score -= min(24, int(existing_coverage * 0.45))
             score -= crowd_penalty
             if season and tags.get("season") in {season, "all-season"}:
                 score += 12
@@ -998,7 +1008,14 @@ class ReferenceCatalog:
         existing_coverage = max(
             0, min(100, int(tags.get("existing_print_coverage_percent", 0) or 0))
         )
-        existing_coverable = bool(tags.get("garment_is_plain", False)) or existing_coverage <= 12
+        plain_value = tags.get("garment_is_plain")
+        garment_is_plain = plain_value is True
+        existing_present = plain_value is False or existing_coverage > 0
+        # Without Gemini geometry, only a plain garment or a very small existing
+        # print is safe for local cleanup. Larger prints require an exact box.
+        existing_coverable = garment_is_plain or existing_coverage <= 12
+        existing_box = target_box if existing_present and existing_coverage <= 12 else None
+        fabric_reconstruction_safe = garment_is_plain or existing_coverage <= 12
         local_angle_ok = camera_angle in {"front", "rear"}
         local_framing_ok = framing in {"detail", "close-up", "waist-up"}
         local_safe = (
@@ -1009,6 +1026,7 @@ class ReferenceCatalog:
             and local_framing_ok
             and garment_color_match
             and existing_coverable
+            and fabric_reconstruction_safe
             and target_box is not None
         )
 
@@ -1027,7 +1045,12 @@ class ReferenceCatalog:
             target_print_box=target_box,
             target_print_quad=[],
             garment_color_match=garment_color_match,
+            existing_print_present=existing_present,
+            existing_print_box=existing_box,
+            existing_print_quad=[],
+            existing_print_coverage_percent=existing_coverage,
             existing_print_coverable=existing_coverable,
+            fabric_reconstruction_safe=fabric_reconstruction_safe,
             local_composite_safe=local_safe,
             reason=reason,
         )
@@ -1200,11 +1223,21 @@ class ReferenceCatalog:
             "this order: top-left, top-right, bottom-right, bottom-left. The quad must "
             "follow mild garment perspective. garment_color_match is true only if the "
             "visible garment color and wash are close enough to the requested product. "
-            "existing_print_coverable is true only if any existing graphic can be fully "
-            "covered or locally removed inside the new print area. local_composite_safe "
-            "may be true only for a t-shirt with mild perspective, good color match, at "
-            "least 88% visibility, no occlusion, no severe folds and a usable placement "
-            "box. Keep reason short and objective."
+            "Set existing_print_present true if the visible garment already contains any "
+            "text, logo or graphic in the usable panel. If present, existing_print_box must "
+            "tightly surround the complete old artwork and existing_print_quad must contain "
+            "four normalized corner points in the same order as target_print_quad. Estimate "
+            "existing_print_coverage_percent against the usable garment panel. "
+            "existing_print_coverable is true when the complete old artwork is visible, lies "
+            "on an open t-shirt panel and occupies no more than roughly 24% of that panel. "
+            "fabric_reconstruction_safe is true only when the fabric behind the old print is "
+            "simple enough to rebuild locally: solid or mildly shaded cotton with no acid-wash "
+            "pattern, heavy texture, strong seam, deep fold or complex multicolor fabric. A "
+            "plain garment is preferred but is not required. local_composite_safe may be true "
+            "with an existing print only when its exact box or quad is supplied, it is not more "
+            "than about 1.5 times the new target area, the garment "
+            "color matches, fabric reconstruction is safe, perspective is mild, visibility is "
+            "at least 88%, and there is no occlusion or severe fold. Keep reason short and objective."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,
@@ -1245,15 +1278,45 @@ class ReferenceCatalog:
             and result.print_area_visibility >= 75
         )
         quad_valid = len(result.target_print_quad) in {0, 4}
+        existing_quad_valid = len(result.existing_print_quad) in {0, 4}
+        existing_geometry_ok = (
+            not result.existing_print_present
+            or result.existing_print_box is not None
+            or len(result.existing_print_quad) == 4
+        )
+        existing_size_ok = not result.existing_print_present
+        if result.existing_print_present:
+            existing_size_ok = result.existing_print_coverage_percent <= 24
+            if result.existing_print_box is not None and result.target_print_box is not None:
+                existing_area = (
+                    result.existing_print_box.width * result.existing_print_box.height
+                )
+                target_area = max(
+                    0.01,
+                    result.target_print_box.width * result.target_print_box.height,
+                )
+                existing_size_ok = (
+                    existing_size_ok and existing_area / target_area <= 1.55
+                )
+        cleanup_ready = (
+            not result.existing_print_present
+            or (
+                result.existing_print_coverable
+                and result.fabric_reconstruction_safe
+            )
+        )
         local_safe = (
             compatible
             and garment_type == "t-shirt"
             and result.local_composite_safe
             and result.garment_color_match
-            and result.existing_print_coverable
+            and cleanup_ready
             and result.print_area_visibility >= 88
             and result.target_print_box is not None
             and quad_valid
+            and existing_quad_valid
+            and existing_geometry_ok
+            and existing_size_ok
         )
         updates = {
             "compatible": compatible,

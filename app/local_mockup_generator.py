@@ -25,6 +25,14 @@ class _Artwork:
     confidence: float
 
 
+@dataclass(frozen=True)
+class _CleanupResult:
+    image: np.ndarray
+    confidence: float
+    removed_coverage: float
+    residual_coverage: float
+
+
 class LocalCompositeNeedsGemini(MockupGenerationError):
     """The local path is unsafe and the job should be escalated to Gemini."""
 
@@ -129,8 +137,23 @@ class LocalMockupGenerator:
                 "Зона принта на референсе определена ненадежно."
             )
 
-        cleaned = self._clean_existing_artwork(reference, quad_px)
-        composed = self._warp_and_blend(cleaned, artwork.rgba, quad_px)
+        cleanup = self._clean_existing_artwork(
+            reference,
+            quad_px,
+            reference_tags=reference_tags,
+            preflight=preflight,
+        )
+        if cleanup.confidence < 0.62:
+            raise LocalCompositeNeedsGemini(
+                "Чужой принт нельзя надежно удалить локально без следов."
+            )
+        logger.info(
+            "Локальное удаление старого принта: coverage=%.3f residual=%.3f confidence=%.2f",
+            cleanup.removed_coverage,
+            cleanup.residual_coverage,
+            cleanup.confidence,
+        )
+        composed = self._warp_and_blend(cleanup.image, artwork.rgba, quad_px)
         composed = self._crop_to_four_five(composed, quad_px)
 
         output = io.BytesIO()
@@ -341,59 +364,352 @@ class LocalMockupGenerator:
         area = abs(float(cv2.contourArea(quad)))
         return area >= width * height * 0.012
 
-    def _clean_existing_artwork(self, image: np.ndarray, quad: np.ndarray) -> np.ndarray:
-        result = image.copy()
-        x, y, width, height = cv2.boundingRect(quad.astype(np.int32))
-        pad_x = max(8, int(width * 0.08))
-        pad_y = max(8, int(height * 0.08))
+    def _clean_existing_artwork(
+        self,
+        image: np.ndarray,
+        quad: np.ndarray,
+        *,
+        reference_tags: dict[str, object],
+        preflight: dict[str, object],
+    ) -> _CleanupResult:
+        """Remove an existing print locally when its exact geometry is known.
+
+        The vision preflight supplies a tight normalized box or quad around the old
+        artwork. The local path then rebuilds only that fabric patch from nearby
+        clean garment pixels. A complex wash, severe fold or missing geometry is
+        escalated to Gemini before any paid image request is made.
+        """
+        tag_coverage = self._bounded_int(
+            reference_tags.get("existing_print_coverage_percent"), 0, 100
+        )
+        coverage_percent = self._bounded_int(
+            preflight.get("existing_print_coverage_percent", tag_coverage), 0, 100
+        )
+        plain_tag = reference_tags.get("garment_is_plain")
+        existing_present = bool(preflight.get("existing_print_present", False))
+        if plain_tag is False or coverage_percent >= 4:
+            existing_present = True
+
+        if not existing_present:
+            return _CleanupResult(
+                image=image.copy(),
+                confidence=0.99,
+                removed_coverage=0.0,
+                residual_coverage=0.0,
+            )
+        if not bool(preflight.get("existing_print_coverable", False)):
+            raise LocalCompositeNeedsGemini(
+                "Чужой принт нельзя полностью удалить в локальном режиме."
+            )
+        if not bool(preflight.get("fabric_reconstruction_safe", False)):
+            raise LocalCompositeNeedsGemini(
+                "Текстура ткани слишком сложная для локального удаления чужого принта."
+            )
+
+        cleanup_quad = self._preflight_quad_pixels(
+            preflight=preflight,
+            box_key="existing_print_box",
+            quad_key="existing_print_quad",
+            image_width=image.shape[1],
+            image_height=image.shape[0],
+        )
+        if cleanup_quad is None:
+            # The local fallback may approve only a tiny old print. In that narrow
+            # case the new target box is a safe approximation. Larger prints must
+            # have their own exact geometry from the vision preflight.
+            if coverage_percent <= 12:
+                cleanup_quad = self._scale_quad(
+                    quad,
+                    scale_x=1.10,
+                    scale_y=1.10,
+                    image_width=image.shape[1],
+                    image_height=image.shape[0],
+                )
+            else:
+                raise LocalCompositeNeedsGemini(
+                    "Не получены точные границы чужого принта для локального удаления."
+                )
+
+        cleanup_quad = self._scale_quad(
+            cleanup_quad,
+            scale_x=1.055,
+            scale_y=1.055,
+            image_width=image.shape[1],
+            image_height=image.shape[0],
+        )
+        if not self._quad_is_valid(cleanup_quad, image.shape[1], image.shape[0]):
+            raise LocalCompositeNeedsGemini(
+                "Границы чужого принта определены ненадежно."
+            )
+
+        x, y, width, height = cv2.boundingRect(cleanup_quad.astype(np.int32))
+        old_area = abs(float(cv2.contourArea(cleanup_quad)))
+        target_area = max(1.0, abs(float(cv2.contourArea(quad))))
+        old_to_new_ratio = old_area / target_area
+        area_ratio = old_area / max(
+            1.0, float(image.shape[0] * image.shape[1])
+        )
+        # OpenCV reconstruction is intentionally limited to small old graphics.
+        # A large old print would leave a visible smooth patch outside the new art.
+        if (
+            area_ratio > 0.12
+            or coverage_percent > 24
+            or old_to_new_ratio > 1.55
+        ):
+            raise LocalCompositeNeedsGemini(
+                "Чужой принт больше безопасной зоны локального удаления."
+            )
+
+        pad_x = max(24, int(width * 0.28))
+        pad_y = max(24, int(height * 0.28))
         x0 = max(0, x - pad_x)
         y0 = max(0, y - pad_y)
         x1 = min(image.shape[1], x + width + pad_x)
         y1 = min(image.shape[0], y + height + pad_y)
-        roi = result[y0:y1, x0:x1].copy()
+        roi = image[y0:y1, x0:x1].copy()
         if roi.size == 0:
-            return result
+            raise LocalCompositeNeedsGemini(
+                "Зона удаления старого принта оказалась пустой."
+            )
 
-        local_quad = quad - np.array([x0, y0], dtype=np.float32)
-        region_mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-        cv2.fillConvexPoly(region_mask, local_quad.astype(np.int32), 255)
+        local_quad = cleanup_quad - np.array([x0, y0], dtype=np.float32)
+        mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(mask, local_quad.astype(np.int32), 255)
+        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+        reconstructed, sample_count, seam_score = self._reconstruct_fabric_surface(
+            roi=roi,
+            mask=mask,
+        )
+        if sample_count < 350:
+            raise LocalCompositeNeedsGemini(
+                "Недостаточно чистой ткани вокруг чужого принта."
+            )
+        if seam_score > 38.0:
+            raise LocalCompositeNeedsGemini(
+                "Локальное восстановление ткани оставило заметную границу."
+            )
 
-        eroded = cv2.erode(region_mask, np.ones((5, 5), np.uint8), iterations=1)
-        ring = cv2.dilate(region_mask, np.ones((17, 17), np.uint8), iterations=1)
-        ring = cv2.subtract(ring, region_mask)
-        ring_pixels = roi[ring > 0]
-        if len(ring_pixels) < 50:
-            return result
+        result = image.copy()
+        result[y0:y1, x0:x1] = reconstructed
+        removed_coverage = float(np.count_nonzero(mask)) / max(1, mask.size)
+        confidence = 0.94
+        confidence -= min(0.14, area_ratio * 0.45)
+        confidence -= min(0.16, seam_score / 240.0)
+        confidence -= 0.05 if sample_count < 1000 else 0.0
+        return _CleanupResult(
+            image=result,
+            confidence=max(0.0, min(1.0, confidence)),
+            removed_coverage=removed_coverage,
+            residual_coverage=0.0,
+        )
 
-        base_bgr = np.median(ring_pixels, axis=0).astype(np.uint8)
+    def _preflight_quad_pixels(
+        self,
+        *,
+        preflight: dict[str, object],
+        box_key: str,
+        quad_key: str,
+        image_width: int,
+        image_height: int,
+    ) -> Optional[np.ndarray]:
+        normalized_quad = self._read_quad(preflight.get(quad_key))
+        if normalized_quad is None:
+            normalized_box = self._read_box(preflight.get(box_key))
+            if normalized_box is None:
+                return None
+            normalized_quad = self._box_to_quad(normalized_box)
+        return np.array(
+            [
+                [x * image_width / 100.0, y * image_height / 100.0]
+                for x, y in normalized_quad
+            ],
+            dtype=np.float32,
+        )
+
+    def _reconstruct_fabric_surface(
+        self,
+        *,
+        roi: np.ndarray,
+        mask: np.ndarray,
+    ) -> tuple[np.ndarray, int, float]:
+        """Fit a smooth garment-lighting surface and restore nearby texture."""
+        outer = cv2.dilate(
+            mask,
+            np.ones((35, 35), np.uint8),
+            iterations=1,
+        )
+        ring = (outer > 0) & (mask == 0)
+        if np.count_nonzero(ring) < 200:
+            outer = cv2.dilate(
+                mask,
+                np.ones((51, 51), np.uint8),
+                iterations=1,
+            )
+            ring = (outer > 0) & (mask == 0)
+
         lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).astype(np.float32)
-        base_lab = cv2.cvtColor(base_bgr.reshape(1, 1, 3), cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
-        delta = np.linalg.norm(lab - base_lab, axis=2)
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        ring_sat = float(np.median(hsv[:, :, 1][ring > 0]))
-        ring_val = float(np.median(hsv[:, :, 2][ring > 0]))
-        sat_difference = np.abs(hsv[:, :, 1].astype(np.float32) - ring_sat)
-        value_difference = np.abs(hsv[:, :, 2].astype(np.float32) - ring_val)
+        ring_pixels = lab[ring]
+        if len(ring_pixels) < 200:
+            return roi.copy(), int(len(ring_pixels)), 999.0
 
-        candidate = (
-            (delta > 34.0)
-            | (sat_difference > 42.0)
-            | ((delta > 22.0) & (value_difference > 38.0))
+        sample_for_cluster = ring_pixels
+        if len(sample_for_cluster) > 16000:
+            rng = np.random.default_rng(7125)
+            indices = rng.choice(len(sample_for_cluster), 16000, replace=False)
+            sample_for_cluster = sample_for_cluster[indices]
+        criteria = (
+            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+            35,
+            0.25,
         )
-        inpaint_mask = (candidate & (eroded > 0)).astype(np.uint8) * 255
-        inpaint_mask = cv2.morphologyEx(
-            inpaint_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+        cluster_count = 3 if len(sample_for_cluster) >= 600 else 2
+        _, labels, centers = cv2.kmeans(
+            sample_for_cluster.astype(np.float32),
+            cluster_count,
+            None,
+            criteria,
+            3,
+            cv2.KMEANS_PP_CENTERS,
         )
-        inpaint_mask = cv2.dilate(
-            inpaint_mask, np.ones((5, 5), np.uint8), iterations=1
+        counts = np.bincount(labels.reshape(-1), minlength=cluster_count)
+        garment_cluster = int(np.argmax(counts))
+        base_lab = centers[garment_cluster]
+        selected = sample_for_cluster[labels.reshape(-1) == garment_cluster]
+        selected_distance = np.linalg.norm(selected - base_lab, axis=1)
+        garment_threshold = max(
+            24.0,
+            min(62.0, self._percentile(selected_distance, 99, 18.0) + 12.0),
         )
-        coverage = float(np.count_nonzero(inpaint_mask)) / max(
-            1, np.count_nonzero(region_mask)
+
+        distance = np.linalg.norm(lab - base_lab, axis=2)
+        sample_zone = cv2.dilate(
+            mask,
+            np.ones((65, 65), np.uint8),
+            iterations=1,
+        ) > 0
+        sample_mask = sample_zone & (mask == 0) & (distance <= garment_threshold)
+        sample_count = int(np.count_nonzero(sample_mask))
+        if sample_count < 350:
+            return roi.copy(), sample_count, 999.0
+
+        surface = self._fit_polynomial_surface(roi, sample_mask)
+        radius = max(4, min(10, int(round(min(roi.shape[:2]) * 0.025))))
+        telea = cv2.inpaint(roi, mask, radius, cv2.INPAINT_TELEA).astype(np.float32)
+
+        residual = roi.astype(np.float32) - surface
+        residual_shifted = np.clip(residual + 128.0, 0, 255).astype(np.uint8)
+        residual_fill = cv2.inpaint(
+            residual_shifted,
+            mask,
+            max(3, radius - 2),
+            cv2.INPAINT_TELEA,
+        ).astype(np.float32) - 128.0
+        rebuilt = np.clip(surface + residual_fill * 0.48, 0, 255)
+        rebuilt = rebuilt * 0.76 + telea * 0.24
+
+        feather = cv2.GaussianBlur(mask, (0, 0), 2.4).astype(np.float32) / 255.0
+        output = (
+            rebuilt * feather[:, :, None]
+            + roi.astype(np.float32) * (1.0 - feather[:, :, None])
         )
-        if 0.002 <= coverage <= 0.48:
-            roi = cv2.inpaint(roi, inpaint_mask, 5, cv2.INPAINT_TELEA)
-            result[y0:y1, x0:x1] = roi
-        return result
+        output = np.clip(output, 0, 255).astype(np.uint8)
+
+        inner_edge = cv2.morphologyEx(
+            mask, cv2.MORPH_GRADIENT, np.ones((7, 7), np.uint8)
+        ) > 0
+        seam_score = float(
+            np.mean(
+                np.abs(output.astype(np.float32) - roi.astype(np.float32))[inner_edge]
+            )
+        ) if np.any(inner_edge) else 0.0
+        return output, sample_count, seam_score
+
+    @staticmethod
+    def _fit_polynomial_surface(
+        roi: np.ndarray,
+        sample_mask: np.ndarray,
+    ) -> np.ndarray:
+        height, width = roi.shape[:2]
+        ys, xs = np.where(sample_mask)
+        if len(xs) > 24000:
+            rng = np.random.default_rng(1337)
+            selected = rng.choice(len(xs), 24000, replace=False)
+            xs = xs[selected]
+            ys = ys[selected]
+        x = xs.astype(np.float64) / max(1, width - 1) * 2.0 - 1.0
+        y = ys.astype(np.float64) / max(1, height - 1) * 2.0 - 1.0
+        design = np.column_stack(
+            [
+                np.ones_like(x),
+                x,
+                y,
+                x * x,
+                y * y,
+                x * y,
+            ]
+        )
+        coefficients: list[np.ndarray] = []
+        for channel in range(3):
+            values = roi[ys, xs, channel].astype(np.float64)
+            coeff, *_ = np.linalg.lstsq(design, values, rcond=None)
+            for _ in range(2):
+                residual = values - design @ coeff
+                median = float(np.median(residual))
+                mad = float(np.median(np.abs(residual - median))) + 1e-6
+                keep = np.abs(residual - median) <= 3.2 * 1.4826 * mad + 3.0
+                if np.count_nonzero(keep) < 120:
+                    break
+                coeff, *_ = np.linalg.lstsq(
+                    design[keep], values[keep], rcond=None
+                )
+            coefficients.append(coeff)
+
+        grid_y, grid_x = np.mgrid[0:height, 0:width]
+        gx = grid_x.astype(np.float64) / max(1, width - 1) * 2.0 - 1.0
+        gy = grid_y.astype(np.float64) / max(1, height - 1) * 2.0 - 1.0
+        grid_design = np.stack(
+            [
+                np.ones_like(gx),
+                gx,
+                gy,
+                gx * gx,
+                gy * gy,
+                gx * gy,
+            ],
+            axis=-1,
+        )
+        coefficient_matrix = np.stack(coefficients, axis=1)
+        surface = np.tensordot(grid_design, coefficient_matrix, axes=([2], [0]))
+        return np.clip(surface, 0, 255).astype(np.float32)
+
+    @staticmethod
+    def _scale_quad(
+        quad: np.ndarray,
+        *,
+        scale_x: float,
+        scale_y: float,
+        image_width: int,
+        image_height: int,
+    ) -> np.ndarray:
+        center = np.mean(quad, axis=0)
+        scaled = quad.copy().astype(np.float32)
+        scaled[:, 0] = center[0] + (scaled[:, 0] - center[0]) * scale_x
+        scaled[:, 1] = center[1] + (scaled[:, 1] - center[1]) * scale_y
+        scaled[:, 0] = np.clip(scaled[:, 0], 1, max(1, image_width - 2))
+        scaled[:, 1] = np.clip(scaled[:, 1], 1, max(1, image_height - 2))
+        return scaled
+
+    @staticmethod
+    def _bounded_int(value: object, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value or 0)
+        except (TypeError, ValueError):
+            parsed = 0
+        return max(minimum, min(maximum, parsed))
+
+    @staticmethod
+    def _percentile(values: np.ndarray, percentile: float, default: float) -> float:
+        return float(np.percentile(values, percentile)) if values.size else default
 
     def _warp_and_blend(
         self,

@@ -116,6 +116,172 @@ class LocalPipelineTests(unittest.IsolatedAsyncioTestCase):
             red_pixels = (array[:, :, 0] > 170) & (array[:, :, 1] < 90)
             self.assertGreater(int(red_pixels.sum()), 1000)
 
+    def test_existing_print_is_removed_locally(self) -> None:
+        generator = LocalMockupGenerator()
+        reference = np.full((900, 720, 3), 235, dtype=np.uint8)
+        # Mild vertical lighting gradient to imitate fabric shading.
+        for row in range(reference.shape[0]):
+            shade = int((row / reference.shape[0]) * 18)
+            reference[row, :, :] = np.clip(reference[row, :, :] - shade, 0, 255)
+        cv2 = __import__("cv2")
+        cv2.putText(
+            reference,
+            "OLD PRINT",
+            (245, 405),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (25, 35, 215),
+            4,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(reference, (285, 450), (435, 510), (35, 150, 240), -1)
+        quad = np.array(
+            [[245, 345], [475, 345], [475, 545], [245, 545]], dtype=np.float32
+        )
+        before = reference.copy()
+        cleanup = generator._clean_existing_artwork(
+            reference,
+            quad,
+            reference_tags={
+                "garment_is_plain": False,
+                "existing_print_coverage_percent": 18,
+            },
+            preflight={
+                "existing_print_present": True,
+                "existing_print_box": {
+                    "x": 32.0,
+                    "y": 43.0,
+                    "width": 35.0,
+                    "height": 16.0,
+                },
+                "existing_print_quad": [],
+                "existing_print_coverage_percent": 18,
+                "existing_print_coverable": True,
+                "fabric_reconstruction_safe": True,
+            },
+        )
+        before_color = (
+            (before[:, :, 2] > 150)
+            & (before[:, :, 1] < 190)
+            & (before[:, :, 0] < 120)
+        )
+        after = cleanup.image
+        after_color = (
+            (after[:, :, 2] > 150)
+            & (after[:, :, 1] < 190)
+            & (after[:, :, 0] < 120)
+        )
+        self.assertGreater(int(before_color.sum()), 1800)
+        self.assertLess(int(after_color.sum()), int(before_color.sum() * 0.25))
+        self.assertGreater(cleanup.confidence, 0.62)
+
+    async def test_local_compositor_replaces_existing_print(self) -> None:
+        reference = Image.new("RGB", (800, 1000), (225, 225, 225))
+        draw = ImageDraw.Draw(reference)
+        draw.rounded_rectangle((160, 150, 640, 910), radius=55, fill=(238, 238, 238))
+        draw.text((260, 390), "OLD", fill=(20, 40, 210))
+        draw.rectangle((260, 450, 540, 590), fill=(230, 110, 35))
+        reference_data = io.BytesIO()
+        reference.save(reference_data, format="JPEG", quality=95)
+
+        product = Image.new("RGB", (600, 600), (180, 180, 180))
+        draw = ImageDraw.Draw(product)
+        draw.rectangle((90, 40, 510, 580), fill=(245, 245, 245))
+        draw.rectangle((210, 190, 390, 350), fill=(25, 180, 80))
+        product_data = io.BytesIO()
+        product.save(product_data, format="JPEG", quality=95)
+
+        print_asset = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(print_asset)
+        draw.rounded_rectangle((20, 20, 280, 180), radius=30, fill=(25, 180, 80, 255))
+        print_data = io.BytesIO()
+        print_asset.save(print_data, format="PNG")
+
+        direction = PhotoDirection(
+            label="test",
+            gender="women",
+            pose_kind="standing",
+            person="adult woman",
+            setting="simple street",
+            pose="standing naturally",
+            camera="front",
+            framing="waist-up",
+            light="daylight",
+            seed=2,
+        )
+        output = await LocalMockupGenerator().generate_variant(
+            image_bytes=product_data.getvalue(),
+            mime_type="image/jpeg",
+            spec=self._spec(),
+            direction=direction,
+            request_token="test-existing",
+            print_image_bytes=print_data.getvalue(),
+            print_mime_type="image/png",
+            reference_image_bytes=reference_data.getvalue(),
+            reference_mime_type="image/jpeg",
+            reference_tags={
+                "garment_is_plain": False,
+                "existing_print_coverage_percent": 18,
+                "preflight": {
+                    "local_composite_safe": True,
+                    "existing_print_present": True,
+                    "existing_print_box": {
+                        "x": 30,
+                        "y": 37,
+                        "width": 40,
+                        "height": 24,
+                    },
+                    "existing_print_quad": [],
+                    "existing_print_coverage_percent": 18,
+                    "existing_print_coverable": True,
+                    "fabric_reconstruction_safe": True,
+                    "target_print_box": {
+                        "x": 33,
+                        "y": 38,
+                        "width": 34,
+                        "height": 22,
+                    },
+                    "target_print_quad": [],
+                },
+            },
+        )
+        with Image.open(io.BytesIO(output.data)) as result:
+            array = np.asarray(result.convert("RGB"))
+            green_pixels = (array[:, :, 1] > 130) & (array[:, :, 0] < 100)
+            old_red_pixels = (array[:, :, 0] > 160) & (array[:, :, 1] < 100)
+            self.assertGreater(int(green_pixels.sum()), 1000)
+            self.assertLess(int(old_red_pixels.sum()), 500)
+
+    def test_large_existing_print_is_not_removed_locally(self) -> None:
+        generator = LocalMockupGenerator()
+        reference = np.full((900, 720, 3), 235, dtype=np.uint8)
+        quad = np.array(
+            [[280, 360], [440, 360], [440, 520], [280, 520]], dtype=np.float32
+        )
+        from app.local_mockup_generator import LocalCompositeNeedsGemini
+        with self.assertRaises(LocalCompositeNeedsGemini):
+            generator._clean_existing_artwork(
+                reference,
+                quad,
+                reference_tags={
+                    "garment_is_plain": False,
+                    "existing_print_coverage_percent": 40,
+                },
+                preflight={
+                    "existing_print_present": True,
+                    "existing_print_box": {
+                        "x": 20.0,
+                        "y": 25.0,
+                        "width": 60.0,
+                        "height": 45.0,
+                    },
+                    "existing_print_quad": [],
+                    "existing_print_coverage_percent": 40,
+                    "existing_print_coverable": True,
+                    "fabric_reconstruction_safe": True,
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
