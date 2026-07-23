@@ -3,7 +3,7 @@ from typing import Literal, Protocol
 
 
 GenerationTier = Literal["routine", "complex", "very_complex"]
-GenerationProvider = Literal["bfl", "gemini", "none"]
+GenerationProvider = Literal["local", "gemini"]
 
 
 class MockupSpecLike(Protocol):
@@ -35,9 +35,8 @@ class GenerationDecision:
     @property
     def provider_label_ru(self) -> str:
         return {
-            "bfl": "FLUX",
+            "local": "локальный режим",
             "gemini": "Gemini",
-            "none": "не подключен",
         }[self.provider]
 
 
@@ -45,30 +44,22 @@ def choose_generation_model(
     *,
     spec: MockupSpecLike,
     has_separate_print: bool,
-    economy_available: bool,
-    economy_model: str,
+    local_composite_safe: bool,
     gemini_lite_model: str,
 ) -> GenerationDecision:
-    """Route work before any paid request starts.
+    """Choose the local compositor whenever it can preserve the product safely.
 
-    Routine and complex tasks use the cheaper FLUX path. Gemini 3.1 Flash Lite
-    Image is reserved only for jobs where preserving the artwork is unusually
-    difficult. If the economy provider is unavailable, normal work is blocked
-    rather than silently spending Gemini credits.
+    Gemini image generation is reserved for cases where direct local replacement
+    is unsafe: complex garment construction, strong perspective, occlusion, color
+    mismatch, an unremovable existing print or unreliable artwork extraction.
     """
 
     score = 0
     reasons: list[str] = []
 
-    is_back = spec.side == "back"
-    if is_back:
-        score += 3
+    if spec.side == "back":
+        score += 1
         reasons.append("принт сзади")
-
-    no_print_asset = not has_separate_print
-    if no_print_asset:
-        score += 3
-        reasons.append("нет отдельного PNG принта")
 
     theme = spec.print_theme.casefold()
     text_markers = (
@@ -81,59 +72,41 @@ def choose_generation_model(
         "типограф",
         "слоган",
     )
-    has_text = any(marker in theme for marker in text_markers)
-    if has_text:
-        score += 4
+    if any(marker in theme for marker in text_markers):
+        score += 2
         reasons.append("важный текст в принте")
 
-    if spec.garment_type in {"cap", "jacket", "zip-hoodie"}:
-        score += 2
+    if not has_separate_print:
+        score += 1
+        reasons.append("принт извлекается из исходного фото")
+
+    if spec.garment_type != "t-shirt":
+        score += 4
         reasons.append("сложная конструкция изделия")
 
-    if spec.geometry_mode == "source-guided":
-        score += 1
-        reasons.append("геометрия берется из исходного фото")
-
-    if spec.analysis_confidence < 70:
+    if spec.analysis_confidence < 65:
         score += 2
         reasons.append("пониженная уверенность анализа")
 
-    large_print = max(spec.print_width_percent, spec.print_height_percent) >= 65
-    if large_print:
+    if max(spec.print_width_percent, spec.print_height_percent) >= 68:
         score += 1
-        reasons.append("крупный принт")
+        reasons.append("очень крупный принт")
 
-    critical_combination = (
-        (has_text and no_print_asset)
-        or (is_back and no_print_asset and large_print)
-        or score >= 8
-    )
-    if critical_combination:
-        return GenerationDecision(
-            tier="very_complex",
-            provider="gemini",
-            model=gemini_lite_model,
-            score=score,
-            reasons=tuple(reasons) or ("сложное сохранение принта",),
-        )
-
-    tier: GenerationTier = "complex" if score >= 4 else "routine"
-    if economy_available:
+    if local_composite_safe and spec.garment_type == "t-shirt":
+        tier: GenerationTier = "complex" if score >= 4 else "routine"
         return GenerationDecision(
             tier=tier,
-            provider="bfl",
-            model=economy_model,
+            provider="local",
+            model="OpenCV local compositor",
             score=score,
-            reasons=tuple(reasons) or ("стандартная задача",),
+            reasons=tuple(reasons) or ("простая локальная замена принта",),
         )
 
+    reasons.append("локальная замена небезопасна")
     return GenerationDecision(
-        tier=tier,
-        provider="none",
-        model="",
-        score=score,
-        reasons=(
-            *(tuple(reasons) or ("стандартная задача",)),
-            "не подключена экономная модель",
-        ),
+        tier="very_complex",
+        provider="gemini",
+        model=gemini_lite_model,
+        score=max(score, 8),
+        reasons=tuple(reasons),
     )

@@ -57,12 +57,12 @@ MAX_HTML_BYTES = 3 * 1024 * 1024
 MAX_IMAGE_DOWNLOAD_BYTES = 12 * 1024 * 1024
 PINTEREST_SEARCH_ENDPOINT = "https://api.pinterest.com/v5/search/partner/pins"
 PINTEREST_DISCOVERY_QUERIES = (
-    "men oversized t shirt front streetwear waist up flash photography",
-    "men oversized t shirt back print rear view streetwear",
-    "women oversized t shirt front outfit waist up natural photo",
-    "women oversized t shirt back print rear view beach outfit",
-    "unisex oversized t shirt front close up street photography",
-    "unisex oversized t shirt back print rear three quarter",
+    "men oversized blank t shirt front waist up streetwear photo",
+    "men oversized plain t shirt back rear view streetwear",
+    "women oversized blank t shirt front waist up natural photo",
+    "women oversized plain t shirt back rear view beach outfit",
+    "unisex oversized blank t shirt front close up street photography",
+    "unisex oversized plain t shirt back rear three quarter",
     "men hoodie front streetwear waist up",
     "women hoodie back print rear view outfit",
     "men sweatshirt front casual flash photography",
@@ -137,9 +137,23 @@ class ReferenceTags(BaseModel):
     season: Literal["warm", "cold", "all-season"]
     print_side_visible: Literal["front", "back", "both", "cap-front", "unclear"]
     print_area_visibility: int = Field(ge=0, le=100)
+    garment_is_plain: bool = False
+    existing_print_coverage_percent: int = Field(default=0, ge=0, le=100)
     composition_notes: str = Field(min_length=1, max_length=240)
     usable: bool
     unusable_reason: str = Field(default="", max_length=240)
+
+
+class PlacementPoint(BaseModel):
+    x: float = Field(ge=0, le=100)
+    y: float = Field(ge=0, le=100)
+
+
+class PlacementBox(BaseModel):
+    x: float = Field(ge=0, le=100)
+    y: float = Field(ge=0, le=100)
+    width: float = Field(gt=0, le=100)
+    height: float = Field(gt=0, le=100)
 
 
 class ReferenceCompatibility(BaseModel):
@@ -156,6 +170,11 @@ class ReferenceCompatibility(BaseModel):
         "unclear",
     ]
     print_area_visibility: int = Field(ge=0, le=100)
+    target_print_box: Optional[PlacementBox] = None
+    target_print_quad: list[PlacementPoint] = Field(default_factory=list, max_length=4)
+    garment_color_match: bool = False
+    existing_print_coverable: bool = False
+    local_composite_safe: bool = False
     reason: str = Field(min_length=1, max_length=240)
 
 
@@ -395,9 +414,10 @@ class ReferenceCatalog:
         return list(
             dict.fromkeys(
                 [
-                    f"{core} {mood} {framing}",
-                    f"{gender} {garment} {side} street style photography {framing}",
-                    f"{gender} wearing {color} {garment} {side} casual outfit photo",
+                    f"{core} blank plain no print {mood} {framing}",
+                    f"{gender} plain blank {garment} {side} street style photo {framing}",
+                    f"{gender} wearing plain {color} {garment} no logo {side} casual photo",
+                    f"{gender} minimal {color} {garment} empty print area {framing}",
                 ]
             )
         )
@@ -786,7 +806,10 @@ class ReferenceCatalog:
             "the pose: t-shirt, hoodie, sweatshirt, long-sleeve, zip-hoodie, cap or jacket. "
             "gender describes the intended wearer shown in this reference. moods must use "
             "only the supplied enum. print_area_visibility is how clearly a new front or "
-            "back DTF design could be placed while keeping the pose. Mark usable false if "
+            "back DTF design could be placed while keeping the pose. garment_is_plain is "
+            "true only when the visible target panel has no logo, text or illustration. "
+            "existing_print_coverage_percent estimates how much of that panel is occupied "
+            "by existing artwork. Mark usable false if "
             "the person appears under 18, the garment area is mostly hidden, the image is "
             "a collage, an isolated product, a drawing, a studio catalog cutout or too low "
             "quality. composition_notes must briefly preserve the useful pose, camera, "
@@ -884,6 +907,10 @@ class ReferenceCatalog:
             score += 35 if gender == target_gender else 10
             score += 22 * len(mood_set.intersection(tags.get("moods", [])))
             score += framing_score
+            if bool(tags.get("garment_is_plain", False)):
+                score += 85
+            else:
+                score -= min(45, int(tags.get("existing_print_coverage_percent", 0) or 0))
             score -= crowd_penalty
             if season and tags.get("season") in {season, "all-season"}:
                 score += 12
@@ -920,6 +947,11 @@ class ReferenceCatalog:
         mime_type: str,
         garment_type: GarmentTag,
         print_side: Literal["front", "back"],
+        target_shirt_color: str = "",
+        target_fit: str = "",
+        print_width_percent: int = 30,
+        print_height_percent: int = 30,
+        print_top_offset_percent: int = 15,
     ) -> ReferenceCompatibility:
         return await asyncio.to_thread(
             self._validate_reference_for_generation_sync,
@@ -927,6 +959,11 @@ class ReferenceCatalog:
             mime_type,
             garment_type,
             print_side,
+            target_shirt_color,
+            target_fit,
+            print_width_percent,
+            print_height_percent,
+            print_top_offset_percent,
         )
 
     def _validate_reference_for_generation_sync(
@@ -935,21 +972,36 @@ class ReferenceCatalog:
         mime_type: str,
         garment_type: GarmentTag,
         print_side: Literal["front", "back"],
+        target_shirt_color: str,
+        target_fit: str,
+        print_width_percent: int,
+        print_height_percent: int,
+        print_top_offset_percent: int,
     ) -> ReferenceCompatibility:
         prompt = (
-            "This is a strict preflight check before a paid clothing image generation. "
-            f"The target product is a {garment_type} with a {print_side} print. "
-            "Judge only whether this photographic reference can safely control pose, "
-            "camera and crop without hiding or contradicting the printed garment panel. "
-            "For a back print, the person's back must be clearly visible from rear or "
+            "This is a strict preflight check for a clothing mockup. "
+            f"The target product is a {target_shirt_color or 'same-color'} "
+            f"{target_fit or ''} {garment_type} with a {print_side} print. "
+            f"The source print uses about {print_width_percent}% of the garment width, "
+            f"{print_height_percent}% of its height and begins about "
+            f"{print_top_offset_percent}% below the collar. "
+            "Judge whether this photo can be used in two ways: as a pose reference for "
+            "Gemini, and as a direct local composite where only the garment artwork is "
+            "replaced. For a back print, the back must be clearly visible from rear or "
             "rear three-quarter view. For a front print, the front panel must be clearly "
-            "visible. Reject front-facing references for back prints, rear-facing "
-            "references for front prints, unclear body orientation, full-body distant "
-            "shots, crossed arms, hair, bags or props covering the print area, crowds, "
-            "collages, drawings and low-quality images. print_area_visibility is the "
-            "percentage of the required front or back torso panel that remains usable. "
-            "compatible may be true only when visibility is at least 75 and the side is "
-            "unambiguous. Keep reason short and objective."
+            "visible. Reject unclear orientation, distant full-body shots, crossed arms, "
+            "hair, bags or props covering the print area, crowds, collages, drawings and "
+            "low-quality images. print_area_visibility is the usable torso percentage. "
+            "target_print_box is the exact normalized rectangle where the new artwork "
+            "should sit. target_print_quad contains exactly four normalized points in "
+            "this order: top-left, top-right, bottom-right, bottom-left. The quad must "
+            "follow mild garment perspective. garment_color_match is true only if the "
+            "visible garment color and wash are close enough to the requested product. "
+            "existing_print_coverable is true only if any existing graphic can be fully "
+            "covered or locally removed inside the new print area. local_composite_safe "
+            "may be true only for a t-shirt with mild perspective, good color match, at "
+            "least 88% visibility, no occlusion, no severe folds and a usable placement "
+            "box. Keep reason short and objective."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,
@@ -989,14 +1041,26 @@ class ReferenceCatalog:
             and angle_ok
             and result.print_area_visibility >= 75
         )
-        if compatible == result.compatible:
-            return result
-        return result.model_copy(
-            update={
-                "compatible": compatible,
-                "reason": "Сторона, ракурс или видимость зоны принта не подходят",
-            }
+        quad_valid = len(result.target_print_quad) in {0, 4}
+        local_safe = (
+            compatible
+            and garment_type == "t-shirt"
+            and result.local_composite_safe
+            and result.garment_color_match
+            and result.existing_print_coverable
+            and result.print_area_visibility >= 88
+            and result.target_print_box is not None
+            and quad_valid
         )
+        updates = {
+            "compatible": compatible,
+            "local_composite_safe": local_safe,
+        }
+        if not compatible:
+            updates["reason"] = "Сторона, ракурс или видимость зоны принта не подходят"
+        elif result.local_composite_safe and not local_safe:
+            updates["reason"] = "Референс подходит для Gemini, но не для локальной замены"
+        return result.model_copy(update=updates)
 
     def status_text(self) -> str:
         stats = self.repository.reference_stats()

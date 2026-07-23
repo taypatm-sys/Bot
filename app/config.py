@@ -145,10 +145,6 @@ class Config:
     database_url: str = ""
     admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
-    bfl_api_key: str = ""
-    bfl_economy_model: str = "flux-2-klein-4b"
-    bfl_api_base: str = "https://api.bfl.ai/v1"
-    bfl_timeout_seconds: float = 150.0
     gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
     mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
     reference_sources_path: Path = BUNDLED_REFERENCE_SOURCES
@@ -158,7 +154,7 @@ class Config:
     reference_min_pool_size: int = 20
     reference_analysis_timeout_seconds: float = 90.0
     mockup_analysis_timeout_seconds: float = 150.0
-    reference_user_agent: str = "TaypaReferenceCatalog/5.2"
+    reference_user_agent: str = "TaypaReferenceCatalog/5.3"
     pinterest_access_token: str = ""
     pinterest_search_enabled: bool = False
     pinterest_country_code: str = "US"
@@ -209,20 +205,6 @@ class Config:
                 os.getenv("GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL).strip()
                 or DEFAULT_GEMINI_IMAGE_MODEL
             ),
-            bfl_api_key=os.getenv("BFL_API_KEY", "").strip(),
-            bfl_economy_model=(
-                os.getenv("BFL_ECONOMY_MODEL", "flux-2-klein-4b").strip()
-                or "flux-2-klein-4b"
-            ),
-            bfl_api_base=(
-                os.getenv("BFL_API_BASE", "https://api.bfl.ai/v1").strip().rstrip("/")
-                or "https://api.bfl.ai/v1"
-            ),
-            bfl_timeout_seconds=_positive_float(
-                "BFL_TIMEOUT_SECONDS",
-                os.getenv("BFL_TIMEOUT_SECONDS", "150"),
-                150.0,
-            ),
             gemini_image_size=normalize_gemini_image_size(
                 os.getenv("GEMINI_IMAGE_SIZE", DEFAULT_GEMINI_IMAGE_SIZE)
             ),
@@ -263,8 +245,8 @@ class Config:
                 150.0,
             ),
             reference_user_agent=(
-                os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.2").strip()
-                or "TaypaReferenceCatalog/5.2"
+                os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.3").strip()
+                or "TaypaReferenceCatalog/5.3"
             ),
             pinterest_access_token=os.getenv("PINTEREST_ACCESS_TOKEN", "").strip(),
             pinterest_search_enabled=_bool_env(

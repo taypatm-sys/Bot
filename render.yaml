@@ -25,14 +25,6 @@ services:
         value: Asia/Ashgabat
       - key: GEMINI_MODEL
         value: gemini-3.1-flash-lite
-      - key: BFL_API_KEY
-        sync: false
-      - key: BFL_ECONOMY_MODEL
-        value: flux-2-klein-4b
-      - key: BFL_API_BASE
-        value: https://api.bfl.ai/v1
-      - key: BFL_TIMEOUT_SECONDS
-        value: 150
       - key: GEMINI_IMAGE_MODEL
         value: gemini-3.1-flash-lite-image
       - key: GEMINI_IMAGE_SIZE

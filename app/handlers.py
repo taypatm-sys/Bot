@@ -18,7 +18,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from app.bfl_generator import BflMockupGenerator
+from app.local_mockup_generator import LocalCompositeNeedsGemini, LocalMockupGenerator
 from app.config import Config
 from app.copywriter import ImageCopywriter
 from app.formatting import (
@@ -593,7 +593,7 @@ def build_router(
     repository: PostRepository,
     copywriter: ImageCopywriter,
     mockup_generator: MockupGenerator,
-    economy_generator: BflMockupGenerator,
+    local_generator: LocalMockupGenerator,
     reference_catalog: ReferenceCatalog,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
@@ -824,33 +824,6 @@ def build_router(
                 "pinterest_discovery_status", f"ошибка поиска по товару: {str(error)[:160]}"
             )
 
-        generation_decision = choose_generation_model(
-            spec=spec,
-            has_separate_print=bool(print_bytes),
-            economy_available=economy_generator.available,
-            economy_model=config.bfl_economy_model,
-            gemini_lite_model=config.gemini_image_model,
-        )
-        repository.set_setting(
-            "last_mockup_provider", generation_decision.provider_label_ru
-        )
-        repository.set_setting("last_mockup_model", generation_decision.model)
-        repository.set_setting("last_mockup_complexity", generation_decision.label_ru)
-        repository.set_setting(
-            "last_mockup_complexity_reasons",
-            ", ".join(generation_decision.reasons),
-        )
-        if generation_decision.provider == "none":
-            repository.set_setting("last_mockup_status", "нужен BFL_API_KEY")
-            await state.set_state(DraftStates.model_analysis_ready)
-            await status_message.edit_text(
-                "Эта задача не требует Gemini. Экономная модель FLUX не подключена, "
-                "поэтому генерация остановлена без списания. Добавьте BFL_API_KEY "
-                "в Render и повторите.",
-                reply_markup=model_analysis_keyboard(has_print=bool(print_file_id)),
-            )
-            return
-
         generated_file_ids: list[str] = []
         generation_error: str | None = None
 
@@ -860,6 +833,7 @@ def build_router(
             )
             usage_token = ""
             reference_asset = None
+            reference_compatibility = None
             excluded_reference_ids: list[int] = []
             preflight_reasons: list[str] = []
             reference_replacements = 0
@@ -893,6 +867,11 @@ def build_router(
                             mime_type=candidate.image_mime_type,
                             garment_type=spec.garment_type,
                             print_side=spec.side,
+                            target_shirt_color=spec.shirt_color,
+                            target_fit=spec.fit,
+                            print_width_percent=spec.print_width_percent,
+                            print_height_percent=spec.print_height_percent,
+                            print_top_offset_percent=spec.print_top_offset_percent,
                         ),
                         timeout=120.0,
                     )
@@ -936,6 +915,7 @@ def build_router(
                     continue
 
                 reference_asset = candidate
+                reference_compatibility = compatibility
                 usage_token = candidate_token
                 break
 
@@ -952,34 +932,97 @@ def build_router(
                     )
                 break
 
+            if reference_compatibility is None:
+                repository.release_reference_reservation(
+                    reference_asset.id,
+                    usage_token,
+                    outcome="missing_preflight",
+                )
+                generation_error = "Не сохранена проверка референса. Попробуйте еще раз."
+                break
+
+            generation_decision = choose_generation_model(
+                spec=spec,
+                has_separate_print=bool(print_bytes),
+                local_composite_safe=reference_compatibility.local_composite_safe,
+                gemini_lite_model=config.gemini_image_model,
+            )
+            repository.set_setting(
+                "last_mockup_provider", generation_decision.provider_label_ru
+            )
+            repository.set_setting("last_mockup_model", generation_decision.model)
+            repository.set_setting(
+                "last_mockup_complexity", generation_decision.label_ru
+            )
+            repository.set_setting(
+                "last_mockup_complexity_reasons",
+                ", ".join(generation_decision.reasons),
+            )
             repository.set_setting("last_mockup_reference_id", str(reference_asset.id))
             repository.set_setting("last_mockup_reference_passed", "да")
             repository.set_setting("last_mockup_reference_count", "1")
             repository.set_setting("last_mockup_status", "генерация")
+            if generation_decision.provider == "local":
+                process_text = "локально, без платной генерации"
+            else:
+                process_text = f"через {generation_decision.model}"
             await status_message.edit_text(
                 f"Создаю вариант {index} из {len(directions)}. "
-                f"Референс #{reference_asset.id} проверен и передан модели. "
-                f"Сложность: {generation_decision.label_ru}. "
-                f"Провайдер: {generation_decision.provider_label_ru}. "
-                f"Модель: {generation_decision.model}."
+                f"Референс #{reference_asset.id} проверен. "
+                f"Обработка: {process_text}."
+            )
+            preflight_tags = {
+                **reference_asset.tags,
+                "preflight": reference_compatibility.model_dump(),
+            }
+            generator_kwargs = dict(
+                image_bytes=source_bytes,
+                mime_type=source_mime_type,
+                spec=spec,
+                direction=direction,
+                request_token=usage_token,
+                print_image_bytes=print_bytes,
+                print_mime_type=print_mime_type,
+                reference_image_bytes=reference_asset.image_bytes,
+                reference_mime_type=reference_asset.image_mime_type,
+                reference_tags=preflight_tags,
             )
             try:
-                generator_kwargs = dict(
-                    image_bytes=source_bytes,
-                    mime_type=source_mime_type,
-                    spec=spec,
-                    direction=direction,
-                    request_token=usage_token,
-                    print_image_bytes=print_bytes,
-                    print_mime_type=print_mime_type,
-                    reference_image_bytes=reference_asset.image_bytes,
-                    reference_mime_type=reference_asset.image_mime_type,
-                    reference_tags=reference_asset.tags,
-                )
-                if generation_decision.provider == "bfl":
-                    generated_photo = await economy_generator.generate_variant(
-                        **generator_kwargs
-                    )
+                if generation_decision.provider == "local":
+                    try:
+                        generated_photo = await local_generator.generate_variant(
+                            **generator_kwargs
+                        )
+                    except LocalCompositeNeedsGemini as local_error:
+                        logger.info(
+                            "Локальная обработка повышена до Gemini: %s",
+                            local_error.user_message,
+                        )
+                        generation_decision = choose_generation_model(
+                            spec=spec,
+                            has_separate_print=bool(print_bytes),
+                            local_composite_safe=False,
+                            gemini_lite_model=config.gemini_image_model,
+                        )
+                        repository.set_setting(
+                            "last_mockup_provider",
+                            generation_decision.provider_label_ru,
+                        )
+                        repository.set_setting(
+                            "last_mockup_model", generation_decision.model
+                        )
+                        repository.set_setting(
+                            "last_mockup_complexity", generation_decision.label_ru
+                        )
+                        await status_message.edit_text(
+                            "Локальная замена не прошла проверку качества. "
+                            f"Задача повышена до очень сложной и запускается через "
+                            f"{generation_decision.model}."
+                        )
+                        generated_photo = await mockup_generator.generate_variant(
+                            **generator_kwargs,
+                            image_model=generation_decision.model,
+                        )
                 else:
                     generated_photo = await mockup_generator.generate_variant(
                         **generator_kwargs,
@@ -1109,8 +1152,8 @@ def build_router(
                 f"Статус бота в канале: {member.status}\n"
                 f"База: {repository.backend_name}\n"
                 f"Администраторов: {len(config.admin_ids)}\n"
-                f"Обычные задачи: {config.bfl_economy_model if economy_generator.available else 'заблокированы, нужен BFL_API_KEY'}\n"
-                f"Сложные задачи: {config.bfl_economy_model if economy_generator.available else 'заблокированы, нужен BFL_API_KEY'}\n"
+                "Обычные задачи: локально, без оплаты\n"
+                "Сложные задачи: локальная попытка с проверкой\n"
                 f"Очень сложные: {config.gemini_image_model}\n"
                 f"Формат: {config.gemini_image_size}, 4:5\n"
                 "Режим: обязательный проверенный референс\n"
@@ -1124,7 +1167,7 @@ def build_router(
                 f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
                 f"Найдено по последнему товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
                 f"Обработано по последнему товару: {repository.get_setting('last_pinterest_product_processed') or '0'}\n"
-                f"Референс передан модели: {last_reference_passed}\n"
+                f"Референс использован: {last_reference_passed}\n"
                 f"Статус генерации: {last_mockup_status}"
             )
         except Exception as error:
@@ -1223,7 +1266,7 @@ def build_router(
                 f"Модель: {repository.get_setting('last_mockup_model') or 'еще не запускалась'}\n"
                 f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
                 f"Найдено по товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
-                f"Референс передан модели: {last_reference_passed}\n"
+                f"Референс использован: {last_reference_passed}\n"
                 f"Статус: {last_mockup_status}"
             )
 
