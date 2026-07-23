@@ -10,6 +10,7 @@ from app.config import Config, ConfigError
 from app.copywriter import ImageCopywriter
 from app.handlers import build_router
 from app.health import start_health_server
+from app.instance_guard import SingleInstanceError, SingleInstanceGuard
 from app.mockup_generator import MockupGenerator
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
@@ -32,6 +33,10 @@ async def main() -> None:
     bot = Bot(token=config.telegram_bot_token)
     repository = PostRepository(config.database_source)
     repository.initialize()
+    guard = SingleInstanceGuard(
+        database_url=config.database_url,
+        bot_token=config.telegram_bot_token,
+    )
     repository.recover_interrupted_posts()
     repository.seed_presets(DEFAULT_PRODUCT_PRESETS)
 
@@ -105,6 +110,19 @@ async def main() -> None:
     )
 
     health_runner = await start_health_server()
+    try:
+        # Render keeps the previous deployment alive until the new health endpoint
+        # becomes available. Open the port first, then wait for the old polling
+        # session to release the cross-process lock.
+        await asyncio.to_thread(guard.acquire, 180.0)
+    except SingleInstanceError as error:
+        logging.getLogger(__name__).error("Polling не запущен: %s", error)
+        if health_runner is not None:
+            await health_runner.cleanup()
+        repository.close()
+        await bot.session.close()
+        return
+
     scheduler_task = asyncio.create_task(publisher.run_scheduler())
     reference_task = asyncio.create_task(reference_catalog.run())
     try:
@@ -133,6 +151,7 @@ async def main() -> None:
         if health_runner is not None:
             await health_runner.cleanup()
         repository.close()
+        guard.close()
         await bot.session.close()
 
 

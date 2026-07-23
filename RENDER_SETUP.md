@@ -1,3 +1,7 @@
+## V6.0
+
+При обновлении Render новый экземпляр сначала открывает health-port, затем получает PostgreSQL advisory lock для Telegram polling. Это предотвращает постоянную ошибку `terminated by other getUpdates request` и не блокирует zero-downtime deploy.
+
 # Обновление бота на Render
 
 Эта версия работает как бесплатный Render Web Service и хранит очередь,
