@@ -126,3 +126,69 @@ def test_postgres_lifecycle_backfill_parameterizes_unicode_like_pattern() -> Non
     assert "simple_reason LIKE %s" in connection.query
     assert "%чистая%" not in connection.query
     assert connection.params == ("%чистая%",)
+
+
+def test_claim_specific_simple_reference() -> None:
+    path = Path(tempfile.mkdtemp()) / "test.sqlite3"
+    repository = PostRepository(path)
+    repository.initialize()
+    first = _ready_reference(repository)
+    repository.enqueue_reference_urls(
+        ["https://www.pinterest.com/pin/654321/"], source_name="test"
+    )
+    job = repository.claim_reference_import()
+    assert job is not None
+    repository.store_reference_image(
+        job.id,
+        pin_id="654321",
+        resolved_image_url="https://i.pinimg.com/example2.jpg",
+        image_bytes=b"image2",
+        image_mime_type="image/jpeg",
+        thumbnail_bytes=b"thumb2",
+        width=100,
+        height=120,
+        image_sha256="hash2",
+    )
+    repository.mark_reference_ready(
+        job.id,
+        tags={
+            "usable": True,
+            "garment_types": ["t-shirt"],
+            "gender": "women",
+            "print_area_visibility": 95,
+            "print_side_visible": "front",
+            "camera_angle": "front",
+            "framing": "waist-up",
+            "garment_is_plain": True,
+        },
+    )
+    claimed = repository.claim_specific_simple_reference(job.id)
+    assert claimed is not None
+    assert claimed.id == job.id
+    assert repository.claim_specific_simple_reference(first) is not None
+    repository.close()
+
+
+def test_legacy_level_b_is_reset_once() -> None:
+    path = Path(tempfile.mkdtemp()) / "test.sqlite3"
+    repository = PostRepository(path)
+    repository.initialize()
+    reference_id = _ready_reference(repository)
+    repository.store_simple_reference_variant(
+        reference_id,
+        image_bytes=b"bad-prepared",
+        image_mime_type="image/jpeg",
+        thumbnail_bytes=b"bad-thumb",
+        ready=True,
+        reason="старый принт удален заранее",
+        level="B",
+        quality_score=88,
+    )
+    assert repository.reset_legacy_simple_level_b_for_revalidation() == 1
+    asset = repository.get_reference_asset(reference_id)
+    assert asset is not None
+    assert asset.simple_status == "pending"
+    assert not asset.simple_ready
+    assert asset.simple_image_bytes is None
+    assert repository.reset_legacy_simple_level_b_for_revalidation() == 0
+    repository.close()
