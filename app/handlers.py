@@ -2,7 +2,6 @@ import asyncio
 import io
 import logging
 import secrets
-from dataclasses import asdict
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
@@ -37,7 +36,6 @@ from app.mockup_generator import (
     MockupGenerationError,
     MockupGenerator,
     MockupSpec,
-    PhotoDirection,
     PrintAssetSpec,
     choose_photo_directions,
     ensure_mockup_spec_ready,
@@ -66,7 +64,6 @@ class DraftStates(StatesGroup):
     model_analysis_ready = State()
     generating_model_photos = State()
     model_photos_ready = State()
-    gemini_preview = State()
     waiting_reference_list = State()
     waiting_size = State()
     waiting_custom_size = State()
@@ -170,12 +167,6 @@ def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Найти референсы без API",
-                    callback_data="model:search-references",
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text=print_label,
                     callback_data="model:print",
                 )
@@ -247,54 +238,6 @@ _MOOD_LABELS = {
 }
 
 
-def reference_card_text(asset) -> str:
-    tags = asset.tags or {}
-    garment_types = ", ".join(tags.get("garment_types", [])) or "не определено"
-    raw_gender = str(tags.get("gender", "unisex"))
-    gender = _GENDER_LABELS.get(raw_gender, raw_gender)
-    side_map = {
-        "front": "спереди",
-        "back": "сзади",
-        "both": "обе стороны",
-        "cap-front": "спереди",
-        "unclear": "неясно",
-    }
-    side = side_map.get(str(tags.get("print_side_visible", "unclear")), "неясно")
-    lifecycle_labels = {
-        "raw": "RAW - исходный",
-        "prepared": "PREPARED - подготовлен",
-        "matched": "MATCHED - подобран",
-        "successful": "SUCCESSFUL - успешный",
-    }
-    simple_status_labels = {
-        "pending": "ожидает подготовки",
-        "processing": "готовится",
-        "ready": "готов",
-        "skipped": "не подходит",
-    }
-    preparation_reason = asset.simple_reason or "нет"
-    match_reason = asset.last_match_reason or "еще не проверялся"
-    foreign_print = "нет" if tags.get("garment_is_plain") else "есть"
-    return (
-        f"Референс #{asset.id}\n\n"
-        f"Состояние: {lifecycle_labels.get(asset.lifecycle_state, asset.lifecycle_state)}\n"
-        f"Простой режим: {simple_status_labels.get(asset.simple_status, asset.simple_status)}\n"
-        f"Уровень: {asset.simple_level}\n"
-        f"Качество подготовки: {asset.simple_quality_score}/100\n"
-        f"Последняя совместимость: {asset.last_match_score}/100\n"
-        f"Успешно: {asset.success_count} | Неудачно: {asset.failure_count}\n\n"
-        f"Изделия: {garment_types}\n"
-        f"Категория: {gender}\n"
-        f"Сторона: {side}\n"
-        f"Ракурс: {tags.get('camera_angle', 'не определен')}\n"
-        f"Кадрирование: {tags.get('framing', 'не определено')}\n"
-        f"Видимость зоны: {tags.get('print_area_visibility', 0)}%\n"
-        f"Чужой принт: {foreign_print}\n\n"
-        f"Источник: {asset.source_name or asset.source_url[:120]}\n"
-        f"Подготовка: {preparation_reason[:350]}\n"
-        f"Совместимость: {match_reason[:350]}"
-    )
-
 def format_model_analysis(
     spec: MockupSpec,
     print_asset: PrintAssetSpec | None = None,
@@ -357,23 +300,13 @@ def references_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Просмотреть референсы",
-                    callback_data="references:view:0",
+                    text="Добавить список ссылок",
+                    callback_data="references:add",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Добавить список ссылок",
-                    callback_data="references:add",
-                ),
-                InlineKeyboardButton(
-                    text="Подготовить все",
-                    callback_data="references:prepare-all",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Продолжить обработку",
+                    text="Продолжить сейчас",
                     callback_data="references:retry",
                 ),
                 InlineKeyboardButton(
@@ -383,76 +316,6 @@ def references_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
-
-
-def reference_card_keyboard(reference_id: int, offset: int, total: int) -> InlineKeyboardMarkup:
-    previous_offset = max(0, offset - 1)
-    next_offset = min(max(0, total - 1), offset + 1)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Назад", callback_data=f"references:view:{previous_offset}"),
-                InlineKeyboardButton(text=f"{offset + 1}/{max(1, total)}", callback_data="references:noop"),
-                InlineKeyboardButton(text="Далее", callback_data=f"references:view:{next_offset}"),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Подготовить заново",
-                    callback_data=f"references:prepare:{reference_id}:{offset}",
-                ),
-                InlineKeyboardButton(
-                    text="Проверить на макете",
-                    callback_data=f"references:test:{reference_id}:{offset}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Удалить",
-                    callback_data=f"references:delete:{reference_id}:{offset}",
-                ),
-                InlineKeyboardButton(text="К списку", callback_data="settings:references"),
-            ],
-        ]
-    )
-
-
-def gemini_preview_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Запустить Gemini", callback_data="model:gemini-confirm"),
-            ],
-            [
-                InlineKeyboardButton(text="Другой референс", callback_data="model:gemini-other"),
-                InlineKeyboardButton(text="Отмена", callback_data="model:cancel"),
-            ],
-        ]
-    )
-
-
-def product_reference_search_keyboard(
-    links: list[tuple[str, str, str]],
-) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for label, _query, url in links[:4]:
-        rows.append([InlineKeyboardButton(text=label, url=url)])
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Отправить выбранные ссылки",
-                callback_data="model:add-reference-links",
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Назад к макету",
-                callback_data="model:return-analysis",
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def schedule_keyboard(config: Config) -> InlineKeyboardMarkup:
@@ -781,193 +644,6 @@ def build_router(
         if data.get("model_source_file_id"):
             repository.save_model_draft(chat_id, data)
 
-    async def prepare_gemini_preview(
-        *,
-        message: Message,
-        state: FSMContext,
-        replace_current: bool = False,
-    ) -> bool:
-        data = await restore_model_draft(state, message.chat.id)
-        raw_spec = data.get("model_mockup_spec")
-        if not raw_spec:
-            await message.answer("Анализ макета не найден.")
-            return False
-        spec = validated_mockup_spec(raw_spec)
-        ensure_mockup_spec_ready(spec)
-
-        excluded_ids = list(data.get("model_preview_excluded_ids", []))
-        old_reference_id = data.get("model_preview_reference_id")
-        old_usage_token = data.get("model_preview_usage_token")
-        if replace_current and old_reference_id and old_usage_token:
-            repository.release_reference_reservation(
-                int(old_reference_id),
-                str(old_usage_token),
-                outcome="preview_replaced",
-            )
-            excluded_ids.append(int(old_reference_id))
-
-        stored_direction = data.get("model_preview_direction")
-        if stored_direction and not replace_current:
-            direction = PhotoDirection(**stored_direction)
-        else:
-            used_labels = list(
-                dict.fromkeys(
-                    [
-                        *repository.get_recent_mockup_directions(limit=10),
-                        *data.get("model_used_direction_labels", []),
-                    ]
-                )
-            )
-            direction = choose_photo_directions(
-                1,
-                target_gender=spec.target_gender,
-                garment_type=spec.garment_type,
-                exclude_labels=used_labels,
-            )[0]
-
-        waiting = await message.answer(
-            "Подбираю референс и проверяю его до платной генерации..."
-        )
-        selected = None
-        selected_compatibility = None
-        selected_token = ""
-        reject_reasons: list[str] = []
-        for attempt in range(1, 7):
-            token = f"preview:{message.chat.id}:{secrets.token_hex(5)}:{attempt}"
-            candidate = reference_catalog.select_reference(
-                garment_type=spec.garment_type,
-                target_gender=direction.gender,
-                moods=spec.moods,
-                request_token=token,
-                print_side=spec.side,
-                exclude_ids=excluded_ids,
-                simple_only=False,
-                shirt_color=spec.shirt_color,
-                fit=spec.fit,
-            )
-            if candidate is None:
-                break
-            try:
-                compatibility = await asyncio.wait_for(
-                    reference_catalog.validate_reference_for_generation(
-                        image_bytes=candidate.image_bytes,
-                        mime_type=candidate.image_mime_type,
-                        garment_type=spec.garment_type,
-                        print_side=spec.side,
-                        target_shirt_color=spec.shirt_color,
-                        target_fit=spec.fit,
-                        print_width_percent=spec.print_width_percent,
-                        print_height_percent=spec.print_height_percent,
-                        print_top_offset_percent=spec.print_top_offset_percent,
-                    ),
-                    timeout=120.0,
-                )
-            except Exception as error:
-                logger.warning(
-                    "Gemini preview preflight для референса #%s недоступен: %s",
-                    candidate.id,
-                    error,
-                )
-                compatibility = reference_catalog.fallback_reference_compatibility(
-                    asset=candidate,
-                    garment_type=spec.garment_type,
-                    print_side=spec.side,
-                    target_shirt_color=spec.shirt_color,
-                    print_width_percent=spec.print_width_percent,
-                    print_height_percent=spec.print_height_percent,
-                    print_top_offset_percent=spec.print_top_offset_percent,
-                )
-            if not compatibility.compatible:
-                excluded_ids.append(candidate.id)
-                reject_reasons.append(f"#{candidate.id}: {compatibility.reason}")
-                repository.release_reference_reservation(
-                    candidate.id,
-                    token,
-                    outcome="preview_rejected",
-                )
-                continue
-            selected = candidate
-            selected_compatibility = compatibility
-            selected_token = token
-            break
-
-        if selected is None or selected_compatibility is None:
-            detail = (
-                "Последние причины:\n" + "\n".join(reject_reasons[-3:])
-                if reject_reasons
-                else "Добавьте новые референсы."
-            )
-            await waiting.edit_text(
-                "Подходящий референс не найден. Генерация не запускалась.\n\n"
-                + detail
-            )
-            await state.set_state(DraftStates.model_analysis_ready)
-            return False
-
-        score = selected.last_match_score
-        reasons = selected.last_match_reason or selected_compatibility.reason
-        await state.update_data(
-            model_generation_mode="gemini",
-            model_preview_reference_id=selected.id,
-            model_preview_usage_token=selected_token,
-            model_preview_direction=asdict(direction),
-            model_preview_compatibility=selected_compatibility.model_dump(),
-            model_preview_excluded_ids=excluded_ids,
-        )
-        await save_model_draft(state, message.chat.id)
-        await state.set_state(DraftStates.gemini_preview)
-        await waiting.delete()
-        side_label = "спереди" if spec.side == "front" else "сзади"
-        await message.answer_photo(
-            photo=BufferedInputFile(
-                selected.thumbnail_bytes or selected.image_bytes,
-                filename=f"reference-{selected.id}.jpg",
-            ),
-            caption=(
-                f"Референс #{selected.id} выбран для Gemini\n\n"
-                f"Совместимость: {score}/100\n"
-                f"Почему выбран: {reasons[:700]}\n\n"
-                f"Сторона: {side_label}\n"
-                f"Цвет товара: {spec.shirt_color}\n"
-                "Платная генерация еще не запускалась."
-            ),
-            reply_markup=gemini_preview_keyboard(),
-        )
-        return True
-
-    async def send_reference_card(
-        message: Message,
-        *,
-        offset: int,
-    ) -> None:
-        total = repository.reference_stats().get("total", 0)
-        if total <= 0:
-            await message.answer("База референсов пуста.", reply_markup=references_keyboard())
-            return
-        offset = max(0, min(offset, total - 1))
-        assets = repository.list_reference_assets(limit=1, offset=offset)
-        if not assets:
-            await message.answer("Референс не найден.", reply_markup=references_keyboard())
-            return
-        asset = assets[0]
-        photo_bytes = (
-            asset.simple_thumbnail_bytes
-            or asset.thumbnail_bytes
-            or asset.simple_image_bytes
-            or asset.image_bytes
-        )
-        if photo_bytes:
-            await message.answer_photo(
-                photo=BufferedInputFile(photo_bytes, filename=f"reference-{asset.id}.jpg"),
-                caption=reference_card_text(asset),
-                reply_markup=reference_card_keyboard(asset.id, offset, total),
-            )
-        else:
-            await message.answer(
-                reference_card_text(asset) + "\n\nИзображение еще не загружено.",
-                reply_markup=reference_card_keyboard(asset.id, offset, total),
-            )
-
     def validated_mockup_spec(raw: dict) -> MockupSpec:
         stored_spec = dict(raw)
         if "print_top_offset_percent" not in stored_spec:
@@ -1120,46 +796,43 @@ def build_router(
             )
         )
         target_gender = spec.target_gender if spec else "unisex"
-        confirmed_direction_data = data.get("model_confirmed_direction")
-        if confirmed_direction_data:
-            confirmed_direction = PhotoDirection(**confirmed_direction_data)
-            directions = [confirmed_direction]
-            if config.mockup_variants > 1:
-                directions.extend(
-                    choose_photo_directions(
-                        config.mockup_variants - 1,
-                        target_gender=target_gender,
-                        garment_type=spec.garment_type if spec else None,
-                        exclude_labels=[*used_labels, confirmed_direction.label],
-                    )
-                )
-        else:
-            directions = choose_photo_directions(
-                config.mockup_variants,
-                target_gender=target_gender,
-                garment_type=spec.garment_type if spec else None,
-                exclude_labels=used_labels,
-            )
+        directions = choose_photo_directions(
+            config.mockup_variants,
+            target_gender=target_gender,
+            garment_type=spec.garment_type if spec else None,
+            exclude_labels=used_labels,
+        )
         await status_message.edit_text(
-            "Проверяю подготовленную базу референсов. Pinterest API не используется. "
+            "Ищу подходящие референсы в Pinterest и пополняю базу. "
             "Платная генерация еще не запущена."
         )
         dynamic_source_name = ""
-        search_links = reference_catalog.build_product_search_links(
-            garment_type=spec.garment_type,
-            target_gender=spec.target_gender,
-            moods=spec.moods,
-            print_side=spec.side,
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
-        repository.set_setting("last_pinterest_product_discovered", "0")
-        repository.set_setting("last_pinterest_product_processed", "0")
+        try:
+            dynamic_source_name, discovered_count, processed_count = (
+                await reference_catalog.discover_for_product(
+                    garment_type=spec.garment_type,
+                    target_gender=spec.target_gender,
+                    moods=spec.moods,
+                    print_side=spec.side,
+                    shirt_color=spec.shirt_color,
+                    fit=spec.fit,
+                    import_now=4,
+                )
+            )
+            repository.set_setting(
+                "last_pinterest_product_discovered", str(discovered_count)
+            )
+            repository.set_setting(
+                "last_pinterest_product_processed", str(processed_count)
+            )
+        except Exception as error:
+            logger.warning("Поиск Pinterest перед генерацией не выполнен: %s", error)
+            repository.set_setting(
+                "pinterest_discovery_status", f"ошибка поиска по товару: {str(error)[:160]}"
+            )
 
         generated_file_ids: list[str] = []
         generation_error: str | None = None
-        confirmed_reference_id = data.get("model_confirmed_reference_id")
-        confirmed_usage_token = str(data.get("model_confirmed_usage_token") or "")
 
         for index, direction in enumerate(directions, start=1):
             wearer_label = (
@@ -1182,75 +855,26 @@ def build_router(
             )
 
             for reference_attempt in range(1, 7):
-                use_confirmed = bool(
-                    index == 1
-                    and reference_attempt == 1
-                    and confirmed_reference_id
-                    and confirmed_usage_token
+                candidate_token = f"{batch_id}:{index}:r{reference_attempt}"
+                candidate = reference_catalog.select_reference(
+                    garment_type=spec.garment_type,
+                    target_gender=direction.gender,
+                    moods=spec.moods,
+                    request_token=candidate_token,
+                    print_side=spec.side,
+                    exclude_ids=excluded_reference_ids,
+                    preferred_source_name=dynamic_source_name,
                 )
-                if use_confirmed:
-                    candidate_token = confirmed_usage_token
-                    candidate = repository.get_reference_asset(int(confirmed_reference_id))
-                else:
-                    candidate_token = f"{batch_id}:{index}:r{reference_attempt}"
-                    candidate = reference_catalog.select_reference(
-                        garment_type=spec.garment_type,
-                        target_gender=direction.gender,
-                        moods=spec.moods,
-                        request_token=candidate_token,
-                        print_side=spec.side,
-                        exclude_ids=excluded_reference_ids,
-                        preferred_source_name=dynamic_source_name,
-                        simple_only=(requested_generation_mode == "local"),
-                        shirt_color=spec.shirt_color,
-                        fit=spec.fit,
-                    )
-                if candidate is None and requested_generation_mode == "local":
-                    await status_message.edit_text(
-                        "Подготавливаю до двух наиболее подходящих референсов именно "
-                        "для этого макета. Платная генерация не запускается."
-                    )
-                    await reference_catalog.prepare_best_simple_candidates(
-                        garment_type=spec.garment_type,
-                        target_gender=direction.gender,
-                        moods=spec.moods,
-                        print_side=spec.side,
-                        shirt_color=spec.shirt_color,
-                        fit=spec.fit,
-                        limit=2,
-                    )
-                    candidate = reference_catalog.select_reference(
-                        garment_type=spec.garment_type,
-                        target_gender=direction.gender,
-                        moods=spec.moods,
-                        request_token=candidate_token,
-                        print_side=spec.side,
-                        exclude_ids=excluded_reference_ids,
-                        preferred_source_name=dynamic_source_name,
-                        simple_only=True,
-                        shirt_color=spec.shirt_color,
-                        fit=spec.fit,
-                    )
                 if candidate is None:
                     break
-                candidate_image_bytes = (
-                    candidate.simple_image_bytes
-                    if requested_generation_mode == "local" and candidate.simple_image_bytes
-                    else candidate.image_bytes
-                )
-                candidate_mime_type = (
-                    candidate.simple_image_mime_type
-                    if requested_generation_mode == "local" and candidate.simple_image_mime_type
-                    else candidate.image_mime_type
-                )
                 try:
                     repository.set_setting(
                         "last_mockup_preflight_mode", "Gemini vision"
                     )
                     compatibility = await asyncio.wait_for(
                         reference_catalog.validate_reference_for_generation(
-                            image_bytes=candidate_image_bytes,
-                            mime_type=candidate_mime_type,
+                            image_bytes=candidate.image_bytes,
+                            mime_type=candidate.image_mime_type,
                             garment_type=spec.garment_type,
                             print_side=spec.side,
                             target_shirt_color=spec.shirt_color,
@@ -1341,21 +965,10 @@ def build_router(
                 )
                 if generation_error is None:
                     if requested_generation_mode == "local":
-                        simple_stats = repository.simple_reference_stats()
-                        waiting_count = simple_stats.get("pending", 0)
-                        processing_count = simple_stats.get("processing", 0)
-                        if waiting_count or processing_count:
-                            generation_error = (
-                                "Для этого макета подходящий простой референс пока не найден. "
-                                f"Ожидают подготовки: {waiting_count}, обрабатывается: {processing_count}. "
-                                "Бот продолжит подготовку в фоне. Можно выбрать сложный режим "
-                                "или повторить простой после появления подходящего уровня A/B."
-                            )
-                        else:
-                            generation_error = (
-                                "Не найден подготовленный референс для простого режима. "
-                                "Добавьте новые ссылки в разделе «Референсы» или выберите «Сложный - Gemini»."
-                            )
+                        generation_error = (
+                            "Не найден референс, подходящий для простого режима. "
+                            "Попробуйте режим «Сложный - Gemini» или другой макет."
+                        )
                     else:
                         generation_error = (
                             "Не найден референс с правильной стороной и открытой зоной "
@@ -1429,35 +1042,6 @@ def build_router(
                 **reference_asset.tags,
                 "preflight": reference_compatibility.model_dump(),
             }
-            reference_bytes_for_generation = reference_asset.image_bytes
-            reference_mime_for_generation = reference_asset.image_mime_type
-            if generation_decision.provider == "local" and reference_asset.simple_ready:
-                reference_bytes_for_generation = (
-                    reference_asset.simple_image_bytes or reference_asset.image_bytes
-                )
-                reference_mime_for_generation = (
-                    reference_asset.simple_image_mime_type
-                    or reference_asset.image_mime_type
-                )
-                preflight_tags.update(
-                    {
-                        "garment_is_plain": True,
-                        "existing_print_coverage_percent": 0,
-                        "simple_prepared": True,
-                    }
-                )
-                clean_preflight = reference_compatibility.model_copy(
-                    update={
-                        "existing_print_present": False,
-                        "existing_print_box": None,
-                        "existing_print_quad": [],
-                        "existing_print_coverage_percent": 0,
-                        "existing_print_coverable": False,
-                        "fabric_reconstruction_safe": True,
-                        "local_composite_safe": True,
-                    }
-                )
-                preflight_tags["preflight"] = clean_preflight.model_dump()
             generator_kwargs = dict(
                 image_bytes=source_bytes,
                 mime_type=source_mime_type,
@@ -1466,8 +1050,8 @@ def build_router(
                 request_token=usage_token,
                 print_image_bytes=print_bytes,
                 print_mime_type=print_mime_type,
-                reference_image_bytes=reference_bytes_for_generation,
-                reference_mime_type=reference_mime_for_generation,
+                reference_image_bytes=reference_asset.image_bytes,
+                reference_mime_type=reference_asset.image_mime_type,
                 reference_tags=preflight_tags,
             )
             try:
@@ -1518,22 +1102,10 @@ def build_router(
                     )
             except MockupGenerationError as error:
                 repository.finish_reference_usage(usage_token, outcome="failed")
-                repository.record_reference_result(
-                    reference_asset.id,
-                    success=False,
-                    match_score=reference_asset.last_match_score,
-                    reason=error.user_message,
-                )
                 repository.set_setting("last_mockup_status", "ошибка генерации")
                 generation_error = error.user_message
                 break
             repository.finish_reference_usage(usage_token, outcome="completed")
-            repository.record_reference_result(
-                reference_asset.id,
-                success=True,
-                match_score=reference_asset.last_match_score,
-                reason="успешная генерация для текущего макета",
-            )
             repository.set_setting("last_mockup_status", "готово")
             sent = await message.answer_photo(
                 photo=BufferedInputFile(
@@ -1568,13 +1140,6 @@ def build_router(
             model_batch_id=batch_id,
             model_generated_file_ids=generated_file_ids,
             model_used_direction_labels=used_labels,
-            model_preview_reference_id=None,
-            model_preview_usage_token=None,
-            model_preview_direction=None,
-            model_preview_compatibility=None,
-            model_confirmed_reference_id=None,
-            model_confirmed_usage_token=None,
-            model_confirmed_direction=None,
         )
         await save_model_draft(state, message.chat.id)
         await state.set_state(DraftStates.model_photos_ready)
@@ -1672,9 +1237,9 @@ def build_router(
                 f"Последняя модель: {repository.get_setting('last_mockup_model') or 'еще не запускалось'}\n"
                 f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
                 f"Сложность: {repository.get_setting('last_mockup_complexity') or 'еще не определялась'}\n"
-                f"Поиск референсов: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
-                
-                
+                f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
+                f"Найдено по последнему товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
+                f"Обработано по последнему товару: {repository.get_setting('last_pinterest_product_processed') or '0'}\n"
                 f"Референс использован: {last_reference_passed}\n"
                 f"Статус генерации: {last_mockup_status}"
             )
@@ -1773,8 +1338,8 @@ def build_router(
                 f"Провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
                 f"Модель: {repository.get_setting('last_mockup_model') or 'еще не запускалась'}\n"
                 f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
-                f"Поиск референсов: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
-                
+                f"Pinterest: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
+                f"Найдено по товару: {repository.get_setting('last_pinterest_product_discovered') or '0'}\n"
                 f"Референс использован: {last_reference_passed}\n"
                 f"Статус: {last_mockup_status}"
             )
@@ -1817,135 +1382,6 @@ def build_router(
                 reply_markup=references_keyboard(),
             )
 
-    @router.callback_query(F.data == "references:noop")
-    async def references_noop(callback: CallbackQuery) -> None:
-        await callback.answer()
-
-    @router.callback_query(F.data.startswith("references:view:"))
-    async def view_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        try:
-            offset = int((callback.data or "").rsplit(":", 1)[1])
-        except (ValueError, IndexError):
-            offset = 0
-        await callback.answer()
-        await send_reference_card(callback.message, offset=offset)
-
-    @router.callback_query(F.data == "references:prepare-all")
-    async def prepare_all_references(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        queued = reference_catalog.prepare_all_simple()
-        await callback.answer(f"Поставлено в очередь: {queued}", show_alert=not bool(queued))
-        if callback.message:
-            await callback.message.answer(
-                "Подготовка запущена в фоне. Статусы RAW, PREPARED и причины отказа "
-                "можно смотреть в карточках референсов.",
-                reply_markup=references_keyboard(),
-            )
-
-    @router.callback_query(F.data.startswith("references:prepare:"))
-    async def prepare_one_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        parts = (callback.data or "").split(":")
-        try:
-            reference_id = int(parts[2])
-            offset = int(parts[3])
-        except (ValueError, IndexError):
-            await callback.answer("Неверный референс", show_alert=True)
-            return
-        queued = reference_catalog.prepare_simple_reference(reference_id)
-        await callback.answer(
-            "Поставлен в очередь подготовки" if queued else "Не удалось поставить в очередь",
-            show_alert=not queued,
-        )
-        await callback.message.answer(
-            f"Референс #{reference_id} будет подготовлен заново в фоне."
-        )
-        await send_reference_card(callback.message, offset=offset)
-
-    @router.callback_query(F.data.startswith("references:delete:"))
-    async def delete_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        parts = (callback.data or "").split(":")
-        try:
-            reference_id = int(parts[2])
-            offset = int(parts[3])
-        except (ValueError, IndexError):
-            await callback.answer("Неверный референс", show_alert=True)
-            return
-        deleted = repository.delete_reference_asset(reference_id)
-        await callback.answer("Удален" if deleted else "Уже удален")
-        total = repository.reference_stats().get("total", 0)
-        if total:
-            await send_reference_card(callback.message, offset=min(offset, total - 1))
-        else:
-            await callback.message.answer("База референсов пуста.")
-
-    @router.callback_query(F.data.startswith("references:test:"))
-    async def test_reference_for_current_mockup(
-        callback: CallbackQuery,
-        state: FSMContext,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        parts = (callback.data or "").split(":")
-        try:
-            reference_id = int(parts[2])
-        except (ValueError, IndexError):
-            await callback.answer("Неверный референс", show_alert=True)
-            return
-        asset = repository.get_reference_asset(reference_id)
-        if asset is None:
-            await callback.answer("Референс не найден", show_alert=True)
-            return
-        data = await restore_model_draft(state, callback.message.chat.id)
-        raw_spec = data.get("model_mockup_spec")
-        if not raw_spec:
-            await callback.answer()
-            await callback.message.answer(
-                f"Для референса #{reference_id} пока нет активного макета.\n"
-                f"Последняя совместимость: {asset.last_match_score}/100\n"
-                f"Причина: {asset.last_match_reason or 'еще не проверялся'}"
-            )
-            return
-        spec = validated_mockup_spec(raw_spec)
-        score, reasons = reference_catalog.score_reference(
-            asset=asset,
-            garment_type=spec.garment_type,
-            target_gender=spec.target_gender,
-            moods=spec.moods,
-            print_side=spec.side,
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
-        repository.update_reference_match(
-            reference_id,
-            score=score,
-            reason="; ".join(reasons),
-        )
-        await callback.answer("Проверено")
-        await callback.message.answer(
-            f"Референс #{reference_id}\n"
-            f"Совместимость с текущим макетом: {score}/100\n\n"
-            + "\n".join(f"- {item}" for item in reasons[:10])
-        )
-
     @router.callback_query(F.data == "references:add")
     async def add_references(callback: CallbackQuery, state: FSMContext) -> None:
         if not await is_admin_callback(callback, config):
@@ -1965,61 +1401,20 @@ def build_router(
         text: str,
         source_name: str,
     ) -> None:
-        state_data = await state.get_data()
-        return_to_model = bool(state_data.get("reference_return_to_model"))
         added, total = reference_catalog.add_text(text, source_name=source_name)
         if total == 0:
             await message.answer(
-                "В сообщении не найдены ссылки Pinterest. Нужны ссылки вида "
+                "В файле не найдены ссылки Pinterest. Нужны ссылки вида "
                 "pinterest.com/pin/... или pin.it/..."
             )
             return
-        duplicates = total - added
-        processed = 0
-        prepared = 0
-        if return_to_model and added:
-            waiting = await message.answer(
-                "Ссылки приняты. Загружаю и подготавливаю первые референсы..."
-            )
-            for _ in range(min(4, added)):
-                if not await reference_catalog.process_next(source_name=source_name):
-                    break
-                processed += 1
-            ready_before = repository.simple_reference_stats().get("ready", 0)
-            for _ in range(processed):
-                if not await reference_catalog.process_next_simple_reference():
-                    break
-            ready_after = repository.simple_reference_stats().get("ready", 0)
-            prepared = max(0, ready_after - ready_before)
-            await waiting.edit_text(
-                f"Обработано сейчас: {processed}. Реально подготовлено для простого режима: {prepared}."
-            )
-        if return_to_model:
-            data = await restore_model_draft(state, message.chat.id)
-            raw_spec = data.get("model_mockup_spec")
-            await state.update_data(reference_return_to_model=False)
-            await state.set_state(DraftStates.model_analysis_ready)
-            if raw_spec:
-                spec = validated_mockup_spec(raw_spec)
-                print_asset = None
-                if data.get("model_print_asset_spec"):
-                    print_asset = PrintAssetSpec.model_validate(data["model_print_asset_spec"])
-                await save_model_draft(state, message.chat.id)
-                await message.answer(
-                    f"Принято ссылок: {total}\n"
-                    f"Новых: {added}\n"
-                    f"Уже были в базе: {duplicates}\n\n"
-                    "Можно снова запустить простой режим.",
-                    reply_markup=model_analysis_keyboard(has_print=bool(print_asset)),
-                )
-                return
         await state.clear()
+        duplicates = total - added
         await message.answer(
             f"Принято ссылок: {total}\n"
             f"Новых: {added}\n"
             f"Уже были в базе: {duplicates}\n\n"
-            "Новые фотографии будут загружены, размечены и отдельно подготовлены "
-            "для простого режима.",
+            "Новые фотографии будут загружены и размечены по очереди в фоне.",
             reply_markup=main_keyboard(),
         )
 
@@ -2067,7 +1462,7 @@ def build_router(
             message,
             state,
             text=message.text or "",
-            source_name=f"telegram-{message.chat.id}-{message.message_id}",
+            source_name="telegram-message",
         )
 
     @router.message(Command("queue"))
@@ -2546,14 +1941,18 @@ def build_router(
         await state.update_data(model_mockup_spec=spec.model_dump())
         await state.set_state(DraftStates.model_analysis_ready)
         await save_model_draft(state, message.chat.id)
-        reference_catalog.build_product_search_links(
-            garment_type=spec.garment_type,
-            target_gender=spec.target_gender,
-            moods=spec.moods,
-            print_side=spec.side,
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
+        try:
+            await reference_catalog.discover_for_product(
+                garment_type=spec.garment_type,
+                target_gender=spec.target_gender,
+                moods=spec.moods,
+                print_side=spec.side,
+                shirt_color=spec.shirt_color,
+                fit=spec.fit,
+                import_now=0,
+            )
+        except Exception as error:
+            logger.warning("Фоновый поиск Pinterest после анализа не выполнен: %s", error)
         await status_message.edit_text(
             format_model_analysis(spec),
             reply_markup=model_analysis_keyboard(has_print=False),
@@ -2603,80 +2002,6 @@ def build_router(
             bot,
             file_id=document.file_id,
             mime_type=mime_type,
-        )
-
-    @router.callback_query(F.data == "model:search-references")
-    async def search_model_references(
-        callback: CallbackQuery,
-        state: FSMContext,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        data = await restore_model_draft(state, callback.message.chat.id)
-        raw_spec = data.get("model_mockup_spec")
-        if not raw_spec:
-            await callback.answer("Анализ макета не найден", show_alert=True)
-            return
-        spec = validated_mockup_spec(raw_spec)
-        links = reference_catalog.build_product_search_links(
-            garment_type=spec.garment_type,
-            target_gender=spec.target_gender,
-            moods=spec.moods,
-            print_side=spec.side,
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
-        await callback.answer()
-        await callback.message.answer(
-            "Откройте один из поисков, выберите подходящие фото и отправьте боту "
-            "ссылки на Pins. Бот сам загрузит, проверит и подготовит их для простого "
-            "и сложного режимов. Pinterest API не нужен.",
-            reply_markup=product_reference_search_keyboard(links),
-        )
-
-    @router.callback_query(F.data == "model:add-reference-links")
-    async def add_model_reference_links(
-        callback: CallbackQuery,
-        state: FSMContext,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        await state.update_data(reference_return_to_model=True)
-        await state.set_state(DraftStates.waiting_reference_list)
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer(
-                "Вставьте выбранные ссылки Pinterest одним сообщением. После импорта "
-                "бот вернет вас к этому макету."
-            )
-
-    @router.callback_query(F.data == "model:return-analysis")
-    async def return_to_model_analysis(
-        callback: CallbackQuery,
-        state: FSMContext,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        data = await restore_model_draft(state, callback.message.chat.id)
-        raw_spec = data.get("model_mockup_spec")
-        if not raw_spec:
-            await callback.answer("Анализ макета не найден", show_alert=True)
-            return
-        spec = validated_mockup_spec(raw_spec)
-        print_asset = None
-        if data.get("model_print_asset_spec"):
-            print_asset = PrintAssetSpec.model_validate(data["model_print_asset_spec"])
-        await state.set_state(DraftStates.model_analysis_ready)
-        await callback.answer()
-        await callback.message.answer(
-            format_model_analysis(spec, print_asset),
-            reply_markup=model_analysis_keyboard(has_print=bool(print_asset)),
         )
 
     @router.callback_query(F.data == "model:print")
@@ -2861,20 +2186,17 @@ def build_router(
                 "генерации. Если качество не пройдет проверку, Gemini не запустится."
             )
         elif callback.data == "model:generate:gemini":
-            await state.update_data(model_generation_mode="gemini")
-            await save_model_draft(state, callback.message.chat.id)
-            await callback.answer("Подбираю референс")
-            await prepare_gemini_preview(
-                message=callback.message,
-                state=state,
-                replace_current=False,
+            generation_mode = "gemini"
+            answer_text = "Запускаю Gemini"
+            status_text = (
+                "Параметры подтверждены. Запускаю создание фото через Gemini 4:5."
             )
-            return
         else:
             generation_mode = "auto"
             answer_text = "Запускаю создание фото"
             status_text = "Параметры подтверждены. Запускаю создание фото 4:5."
 
+        await state.set_state(DraftStates.generating_model_photos)
         await state.update_data(model_generation_mode=generation_mode)
         await save_model_draft(state, callback.message.chat.id)
         await callback.answer(answer_text)
@@ -2884,58 +2206,6 @@ def build_router(
             state=state,
             bot=bot,
             status_message=status_message,
-        )
-
-    @router.callback_query(F.data == "model:gemini-confirm")
-    async def confirm_gemini_preview(
-        callback: CallbackQuery,
-        state: FSMContext,
-        bot: Bot,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        data = await restore_model_draft(state, callback.message.chat.id)
-        if not data.get("model_preview_reference_id"):
-            await callback.answer("Референс предпросмотра не найден", show_alert=True)
-            return
-        await state.update_data(
-            model_generation_mode="gemini",
-            model_confirmed_reference_id=data.get("model_preview_reference_id"),
-            model_confirmed_usage_token=data.get("model_preview_usage_token"),
-            model_confirmed_direction=data.get("model_preview_direction"),
-        )
-        await save_model_draft(state, callback.message.chat.id)
-        await callback.answer("Запускаю Gemini")
-        await callback.message.edit_reply_markup(reply_markup=None)
-        status_message = await callback.message.answer(
-            "Референс подтвержден. Запускаю платную генерацию через Gemini."
-        )
-        await generate_model_batch(
-            message=callback.message,
-            state=state,
-            bot=bot,
-            status_message=status_message,
-        )
-
-    @router.callback_query(F.data == "model:gemini-other")
-    async def choose_other_gemini_reference(
-        callback: CallbackQuery,
-        state: FSMContext,
-    ) -> None:
-        if not await is_admin_callback(callback, config):
-            return
-        if not callback.message:
-            await callback.answer()
-            return
-        await callback.answer("Ищу другой референс")
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await prepare_gemini_preview(
-            message=callback.message,
-            state=state,
-            replace_current=True,
         )
 
     @router.callback_query(F.data == "model:retry-analysis")
@@ -2978,15 +2248,6 @@ def build_router(
         if not callback.message:
             await callback.answer()
             return
-        data = await restore_model_draft(state, callback.message.chat.id)
-        preview_reference_id = data.get("model_preview_reference_id")
-        preview_usage_token = data.get("model_preview_usage_token")
-        if preview_reference_id and preview_usage_token:
-            repository.release_reference_reservation(
-                int(preview_reference_id),
-                str(preview_usage_token),
-                outcome="preview_cancelled",
-            )
         await state.clear()
         repository.clear_model_draft(callback.message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
@@ -3003,15 +2264,6 @@ def build_router(
         if not await is_admin_callback(callback, config):
             return
         if callback.message:
-            data = await restore_model_draft(state, callback.message.chat.id)
-            preview_reference_id = data.get("model_preview_reference_id")
-            preview_usage_token = data.get("model_preview_usage_token")
-            if preview_reference_id and preview_usage_token:
-                repository.release_reference_reservation(
-                    int(preview_reference_id),
-                    str(preview_usage_token),
-                    outcome="preview_cancelled",
-                )
             repository.clear_model_draft(callback.message.chat.id)
         await state.clear()
         await callback.answer("Отменено")
@@ -3039,24 +2291,18 @@ def build_router(
         if await state.get_state() == DraftStates.generating_model_photos.state:
             await callback.answer("Фотографии уже создаются", show_alert=True)
             return
-        if data.get("model_generation_mode") == "gemini":
-            await callback.answer("Подбираю новый референс")
-            await prepare_gemini_preview(
+        await state.set_state(DraftStates.generating_model_photos)
+        await callback.answer("Создаю новые варианты")
+        if callback.message:
+            status_message = await callback.message.answer(
+                "Готовлю новую серию с другими людьми и локациями..."
+            )
+            await generate_model_batch(
                 message=callback.message,
                 state=state,
-                replace_current=False,
+                bot=bot,
+                status_message=status_message,
             )
-            return
-        await callback.answer("Создаю новые варианты")
-        status_message = await callback.message.answer(
-            "Готовлю новую серию с другими людьми и локациями..."
-        )
-        await generate_model_batch(
-            message=callback.message,
-            state=state,
-            bot=bot,
-            status_message=status_message,
-        )
 
     @router.callback_query(F.data.startswith("model:done:"))
     async def finish_model_photos(

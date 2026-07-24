@@ -1072,22 +1072,20 @@ def build_model_photo_prompt(
 
     if has_separate_print and has_style_reference:
         source_rule = (
-            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
-            "for exact garment type, color, wash, cut, fit, construction, print scale "
-            "and placement. Image 2 is EXACT PRINT SOURCE and must be copied without "
-            "redrawing or changing text. Image 3 is STYLE REFERENCE ONLY and controls "
-            "camera distance, crop, pose, lighting direction and background. Discard "
-            "all clothing, colors, logos, text and artwork visible in Image 3."
+            "Three source images are supplied. Image 1 is the exact product source "
+            "for garment color, wash, cut, construction, print scale and placement. "
+            "Image 2 is the exact isolated print source and must be preserved without "
+            "redrawing. Image 3 is the manually selected photographic reference and "
+            "controls camera distance, crop, pose and background simplicity only."
         )
     elif has_source_detail and has_style_reference:
         source_rule = (
-            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
-            "and the only authority for exact garment type, color, wash, cut, fit, "
-            "construction, print scale and placement. Image 2 is a magnified detail "
-            "from the same product and locks every letter, outline, spacing and color. "
-            "Image 3 is STYLE REFERENCE ONLY and controls pose, camera, crop, lighting "
-            "direction and background. Completely discard Image 3 clothing, color, "
-            "logos, text and artwork."
+            "Three source images are supplied. Image 1 is the exact complete product "
+            "source for garment color, cut, construction, print scale and placement. "
+            "Image 2 is a magnified crop from the same product and must be used to "
+            "preserve every visible print detail, letter, outline and color without "
+            "redrawing. Image 3 is the photographic reference and controls only pose, "
+            "camera, crop and background simplicity."
         )
     elif has_separate_print:
         source_rule = (
@@ -1104,13 +1102,10 @@ def build_model_photo_prompt(
         )
     elif has_style_reference:
         source_rule = (
-            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT: "
-            "it is the only authority for garment type, exact color, wash, cut, fit, "
-            "construction, print pixels, print text, scale and placement. Image 2 is "
-            "STYLE REFERENCE ONLY: use only its camera distance, crop, body orientation, "
-            "pose, lighting direction and background. Completely discard and remove the "
-            "clothing, color, logo, text and artwork visible in Image 2. The final wearer "
-            "must wear the exact product from Image 1, not an edited version of Image 2's garment."
+            "Two source images are supplied. Image 1 is the exact product source and "
+            "the only source for garment color, wash, cut, construction and artwork. "
+            "Image 2 is the manually selected photographic reference and controls "
+            "camera distance, crop, pose and background simplicity only."
         )
     else:
         source_rule = (
@@ -1125,17 +1120,13 @@ def build_model_photo_prompt(
     reference_setting = str(reference_tags.get("setting", "")).strip()
     if has_style_reference:
         reference_direction = (
-            "MANUALLY SELECTED PHOTOGRAPHIC REFERENCE - REQUIRED:\n"
-            "- This manually selected photographic reference is mandatory and must control composition.\n"
+            "MANUALLY SELECTED PHOTO REFERENCE - REQUIRED:\n"
             "- The final source image is not optional. Closely match its camera "
             "distance, crop, body orientation, pose, lens feel, background density "
             "and overall photographic composition. Do not invent a different street, "
             "studio, room, activity or camera position.\n"
             "- The product image remains the absolute source of truth for the garment. "
-            "Never copy clothing, colors, logos or artwork from the photo reference. If "
-            "the reference garment contains a foreign print, erase it completely as a "
-            "reference-only detail. No letters, shapes, shadows or ghost traces from that "
-            "foreign print may remain in the final image.\n"
+            "Never copy clothing, colors, logos or artwork from the photo reference.\n"
             "- No crowd, no group of pedestrians and no busy public background. Do not "
             "add extra people. Keep the scene visually quiet and product-focused.\n"
             "- For clothing, the wearer must be close enough that the garment and print "

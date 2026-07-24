@@ -10,7 +10,6 @@ from app.config import Config, ConfigError
 from app.copywriter import ImageCopywriter
 from app.handlers import build_router
 from app.health import start_health_server
-from app.instance_guard import SingleInstanceError, SingleInstanceGuard
 from app.mockup_generator import MockupGenerator
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
@@ -32,25 +31,8 @@ async def main() -> None:
 
     bot = Bot(token=config.telegram_bot_token)
     repository = PostRepository(config.database_source)
-    try:
-        repository.initialize()
-    except Exception:
-        # Initialization may open the PostgreSQL pool before a migration fails.
-        # Close it explicitly and preserve the original traceback.
-        repository.close()
-        await bot.session.close()
-        raise
-    guard = SingleInstanceGuard(
-        database_url=config.database_url,
-        bot_token=config.telegram_bot_token,
-    )
+    repository.initialize()
     repository.recover_interrupted_posts()
-    reset_simple = repository.reset_legacy_simple_level_b_for_revalidation()
-    if reset_simple:
-        logging.getLogger(__name__).warning(
-            "Сброшено старых простых референсов уровня B для повторной проверки: %s",
-            reset_simple,
-        )
     repository.seed_presets(DEFAULT_PRODUCT_PRESETS)
 
     template_store = CaptionTemplateStore(
@@ -91,7 +73,6 @@ async def main() -> None:
         pinterest_search_interval_seconds=config.pinterest_search_interval_seconds,
         pinterest_target_pool_size=config.pinterest_target_pool_size,
         pinterest_queries_per_cycle=config.pinterest_queries_per_cycle,
-        local_generator=local_generator,
     )
     added_references, total_seed_references = reference_catalog.seed_file(
         config.reference_sources_path
@@ -123,19 +104,6 @@ async def main() -> None:
     )
 
     health_runner = await start_health_server()
-    try:
-        # Render keeps the previous deployment alive until the new health endpoint
-        # becomes available. Open the port first, then wait for the old polling
-        # session to release the cross-process lock.
-        await asyncio.to_thread(guard.acquire, 180.0)
-    except SingleInstanceError as error:
-        logging.getLogger(__name__).error("Polling не запущен: %s", error)
-        if health_runner is not None:
-            await health_runner.cleanup()
-        repository.close()
-        await bot.session.close()
-        return
-
     scheduler_task = asyncio.create_task(publisher.run_scheduler())
     reference_task = asyncio.create_task(reference_catalog.run())
     try:
@@ -164,7 +132,6 @@ async def main() -> None:
         if health_runner is not None:
             await health_runner.cleanup()
         repository.close()
-        guard.close()
         await bot.session.close()
 
 
