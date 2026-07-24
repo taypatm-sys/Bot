@@ -939,22 +939,46 @@ _PHOTO_SCENARIOS = (
 )
 
 _PEOPLE = {
-    "women": (
-        "a fictional Central Asian woman in her mid twenties with an ordinary distinctive face, natural skin and dark hair",
-        "a fictional Central Asian woman in her early thirties with a softly angular face, visible skin texture and dark wavy hair",
-        "a fictional woman in her late twenties with a round ordinary face, subtle freckles and a dark bob haircut",
-        "a fictional Central Asian woman in her mid thirties with an expressive everyday face and dark hair tied loosely",
-        "a fictional woman in her early twenties with natural brows, a small facial asymmetry and long dark hair",
-        "a fictional Central Asian woman around forty with a confident ordinary face, fine skin lines and dark hair",
-    ),
-    "men": (
-        "a fictional Central Asian man in his mid twenties with an ordinary distinctive face, natural skin and short dark hair",
-        "a fictional man in his early thirties with a softly angular face, dark wavy hair and light stubble",
-        "a fictional Central Asian man in his late twenties with a round ordinary face and dark curly hair",
-        "a fictional man in his mid thirties with visible skin texture, close-cropped dark hair and a short beard",
-        "a fictional Central Asian man in his early twenties with a small facial asymmetry and medium-length dark hair",
-        "a fictional Central Asian man around forty with an everyday face, fine skin lines and short salt-and-pepper hair",
-    ),
+    "women": {
+        "18-24": (
+            "a fictional Central Asian young woman around 20 years old with an ordinary face, natural youthful skin, dark brows and long dark hair in a relaxed casual style",
+            "a fictional young woman in her early twenties (around 22) with a natural clear face, minimal makeup, subtle freckles and a dark bob haircut",
+            "a fictional Central Asian woman around 21 with a fresh everyday face and dark hair tied in a casual high ponytail",
+        ),
+        "25-34": (
+            "a fictional Central Asian woman in her mid twenties with an ordinary distinctive face, natural skin and dark hair",
+            "a fictional Central Asian woman in her early thirties with a softly angular face, visible skin texture and dark wavy hair",
+            "a fictional woman in her late twenties with a round ordinary face and dark shoulder-length hair",
+        ),
+        "35-44": (
+            "a fictional Central Asian woman in her mid thirties with an expressive everyday face and dark hair tied loosely",
+            "a fictional Central Asian woman around forty with a confident ordinary face, fine skin lines and dark hair",
+        ),
+        "adult-universal": (
+            "a fictional Central Asian young woman in her early twenties with a fresh natural face, dark brows and dark hair in a relaxed casual style",
+            "a fictional woman in her mid twenties with an ordinary clear face, natural skin texture and dark hair",
+        ),
+    },
+    "men": {
+        "18-24": (
+            "a fictional Central Asian young man around 20 years old with a youthful natural face, smooth skin and short dark textured hair",
+            "a fictional young man in his early twenties (around 22) with a relaxed casual look, clear natural skin and dark wavy hair",
+            "a fictional Central Asian young man around 21 with an everyday youthful face, clean-shaven and short dark hair",
+        ),
+        "25-34": (
+            "a fictional Central Asian man in his mid twenties with an ordinary distinctive face, natural skin and short dark hair",
+            "a fictional man in his early thirties with a softly angular face, dark wavy hair and light stubble",
+            "a fictional Central Asian man in his late twenties with a round ordinary face and dark short hair",
+        ),
+        "35-44": (
+            "a fictional man in his mid thirties with visible skin texture, close-cropped dark hair and a short beard",
+            "a fictional Central Asian man in his late thirties with an everyday face and short dark hair",
+        ),
+        "adult-universal": (
+            "a fictional Central Asian young man in his early to mid twenties with a clean natural face and short dark hair",
+            "a fictional man in his mid twenties with a relaxed everyday face, natural skin and dark hair",
+        ),
+    },
 }
 
 
@@ -963,12 +987,20 @@ def choose_photo_directions(
     rng: Optional[random.Random] = None,
     *,
     target_gender: Literal["women", "men", "unisex"] = "unisex",
+    target_age_group: TargetAgeGroup = "adult-universal",
+    moods: Optional[list[str]] = None,
     garment_type: Optional[GarmentType] = None,
     exclude_labels: Optional[list[str]] = None,
 ) -> list[PhotoDirection]:
     if count < 1:
         raise ValueError("Количество вариантов должно быть больше нуля")
     picker = rng or secrets.SystemRandom()
+
+    effective_age: TargetAgeGroup = target_age_group
+    mood_list = set(moods or [])
+    if mood_list.intersection({"youth", "playful", "bold", "sporty"}) or target_age_group == "18-24":
+        effective_age = "18-24"
+
     pool = [
         item
         for item in _PHOTO_SCENARIOS
@@ -990,8 +1022,9 @@ def choose_photo_directions(
             if target_gender == "unisex"
             else target_gender
         )
-        available_people = [p for p in _PEOPLE[gender] if p not in used_people]
-        person = picker.choice(available_people or list(_PEOPLE[gender]))
+        people_group = _PEOPLE[gender].get(effective_age) or _PEOPLE[gender]["adult-universal"]
+        available_people = [p for p in people_group if p not in used_people]
+        person = picker.choice(available_people or list(people_group))
         used_people.add(person)
         directions.append(
             PhotoDirection(

@@ -796,9 +796,13 @@ def build_router(
             )
         )
         target_gender = spec.target_gender if spec else "unisex"
+        target_age = spec.target_age_group if spec else "adult-universal"
+        moods_list = spec.moods if spec else []
         directions = choose_photo_directions(
             config.mockup_variants,
             target_gender=target_gender,
+            target_age_group=target_age,
+            moods=moods_list,
             garment_type=spec.garment_type if spec else None,
             exclude_labels=used_labels,
         )

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Literal, Optional, Sequence
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import aiohttp
 from google import genai
@@ -455,11 +455,6 @@ class ReferenceCatalog:
         if not self.pinterest_search_enabled:
             self.repository.set_setting("pinterest_discovery_status", "выключен")
             return "", 0, 0
-        if not self.pinterest_access_token:
-            self.repository.set_setting(
-                "pinterest_discovery_status", "нужен PINTEREST_ACCESS_TOKEN"
-            )
-            return "", 0, 0
 
         queries = self.build_product_search_queries(
             garment_type=garment_type,
@@ -481,9 +476,14 @@ class ReferenceCatalog:
             if not await self.process_next(source_name=source_name):
                 break
             processed += 1
+        status_prefix = (
+            "поиск по товару (API)"
+            if self.pinterest_access_token
+            else "поиск по товару (публичный веб-поиск)"
+        )
         self.repository.set_setting(
             "pinterest_discovery_status",
-            f"поиск по товару: добавлено {added}, обработано {processed}",
+            f"{status_prefix}: добавлено {added}, обработано {processed}",
         )
         self.repository.set_setting(
             "pinterest_last_product_queries", " || ".join(queries)[:1500]
@@ -492,6 +492,45 @@ class ReferenceCatalog:
             self._wake_event.set()
         return source_name, added, processed
 
+    async def _search_pinterest_public_web(
+        self,
+        terms: Sequence[str],
+        *,
+        source_name: str,
+        max_urls: int = 30,
+    ) -> int:
+        timeout = aiohttp.ClientTimeout(total=25, connect=10, sock_read=15)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        discovered_urls: list[str] = []
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            for term in terms:
+                quoted = quote(term)
+                url = f"https://www.pinterest.com/search/pins/?q={quoted}"
+                try:
+                    async with session.get(url, allow_redirects=True) as response:
+                        if response.status == 200:
+                            html_text = await response.text()
+                            pin_ids = list(dict.fromkeys(PIN_ID_PATTERN.findall(html_text)))
+                            for pin_id in pin_ids:
+                                discovered_urls.append(f"https://www.pinterest.com/pin/{pin_id}/")
+                except Exception as error:
+                    logger.warning("Ошибка публичного поиска Pinterest: %s", error)
+                if len(discovered_urls) >= max_urls:
+                    break
+        unique_urls = list(dict.fromkeys(discovered_urls))[:max_urls]
+        added, _ = self.repository.enqueue_reference_urls(
+            unique_urls, source_name=source_name
+        )
+        return added
+
     async def _search_pinterest_terms(
         self,
         terms: Sequence[str],
@@ -499,6 +538,10 @@ class ReferenceCatalog:
         source_name: str,
         max_urls: int = 30,
     ) -> int:
+        if not self.pinterest_access_token:
+            return await self._search_pinterest_public_web(
+                terms, source_name=source_name, max_urls=max_urls
+            )
         timeout = aiohttp.ClientTimeout(total=35, connect=10, sock_read=20)
         headers = {
             "Authorization": f"Bearer {self.pinterest_access_token}",
@@ -521,8 +564,8 @@ class ReferenceCatalog:
                             retry_after=timedelta(hours=1),
                         )
                     if response.status in {401, 403}:
-                        raise ReferenceImportError(
-                            "Pinterest API не разрешил поиск. Проверьте OAuth token и доступ к search/partner/pins"
+                        return await self._search_pinterest_public_web(
+                            terms, source_name=source_name, max_urls=max_urls
                         )
                     if response.status >= 400:
                         body = (await response.text())[:240]
@@ -543,11 +586,6 @@ class ReferenceCatalog:
         if not self.pinterest_search_enabled:
             self.repository.set_setting("pinterest_discovery_status", "выключен")
             return 0
-        if not self.pinterest_access_token:
-            self.repository.set_setting(
-                "pinterest_discovery_status", "нужен PINTEREST_ACCESS_TOKEN"
-            )
-            return 0
         now = datetime.now(UTC)
         if now < self._next_discovery_at:
             return 0
@@ -564,9 +602,12 @@ class ReferenceCatalog:
 
         try:
             added = await self.discover_from_pinterest()
-            self.repository.set_setting(
-                "pinterest_discovery_status", f"работает, новых ссылок: {added}"
+            status_text = (
+                f"работает (API), новых ссылок: {added}"
+                if self.pinterest_access_token
+                else f"работает (публичный веб-поиск), новых ссылок: {added}"
             )
+            self.repository.set_setting("pinterest_discovery_status", status_text)
             self.repository.set_setting(
                 "pinterest_last_discovery_at", now.isoformat()
             )
