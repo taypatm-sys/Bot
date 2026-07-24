@@ -854,8 +854,9 @@ def build_router(
                 f"{len(directions)}. Платная генерация еще не запущена."
             )
 
-            for reference_attempt in range(1, 7):
+            for reference_attempt in range(1, 10):
                 candidate_token = f"{batch_id}:{index}:r{reference_attempt}"
+                use_relaxed = reference_attempt >= 4
                 candidate = reference_catalog.select_reference(
                     garment_type=spec.garment_type,
                     target_gender=direction.gender,
@@ -864,9 +865,43 @@ def build_router(
                     print_side=spec.side,
                     exclude_ids=excluded_reference_ids,
                     preferred_source_name=dynamic_source_name,
+                    relaxed=use_relaxed,
                 )
                 if candidate is None:
+                    # On-the-fly processing of pending imports or Pinterest discoveries
+                    processed_any = False
+                    for _ in range(4):
+                        if await reference_catalog.process_next():
+                            processed_any = True
+                        else:
+                            break
+                    if processed_any:
+                        candidate = reference_catalog.select_reference(
+                            garment_type=spec.garment_type,
+                            target_gender=direction.gender,
+                            moods=spec.moods,
+                            request_token=candidate_token,
+                            print_side=spec.side,
+                            exclude_ids=excluded_reference_ids,
+                            preferred_source_name=dynamic_source_name,
+                            relaxed=use_relaxed,
+                        )
+                    if candidate is None and not use_relaxed:
+                        candidate = reference_catalog.select_reference(
+                            garment_type=spec.garment_type,
+                            target_gender=direction.gender,
+                            moods=spec.moods,
+                            request_token=candidate_token,
+                            print_side=spec.side,
+                            exclude_ids=excluded_reference_ids,
+                            preferred_source_name=dynamic_source_name,
+                            relaxed=True,
+                        )
+                        use_relaxed = True
+
+                if candidate is None:
                     break
+
                 try:
                     repository.set_setting(
                         "last_mockup_preflight_mode", "Gemini vision"
@@ -904,6 +939,19 @@ def build_router(
                     repository.set_setting(
                         "last_mockup_preflight_mode", "локальная резервная проверка"
                     )
+
+                if not compatibility.compatible and use_relaxed:
+                    fallback_comp = reference_catalog.fallback_reference_compatibility(
+                        asset=candidate,
+                        garment_type=spec.garment_type,
+                        print_side=spec.side,
+                        target_shirt_color=spec.shirt_color,
+                        print_width_percent=spec.print_width_percent,
+                        print_height_percent=spec.print_height_percent,
+                        print_top_offset_percent=spec.print_top_offset_percent,
+                    )
+                    if fallback_comp.compatible:
+                        compatibility = fallback_comp
 
                 if not compatibility.compatible:
                     excluded_reference_ids.append(candidate.id)

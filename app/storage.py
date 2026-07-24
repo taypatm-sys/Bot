@@ -814,13 +814,24 @@ class PostRepository:
             ],
         }
 
-    def list_ready_reference_metadata(self, *, limit: int = 500) -> list[ReferenceAsset]:
+    def list_ready_reference_metadata(
+        self,
+        *,
+        limit: int = 500,
+        ignore_cooldown: bool = False,
+    ) -> list[ReferenceAsset]:
         """Fetch lightweight reference asset headers excluding BLOB fields (image_bytes, thumbnail_bytes)."""
         now = _iso(datetime.now(UTC))
+        cooldown_filter = (
+            "" if ignore_cooldown else "AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?)"
+        )
+        params: tuple[Any, ...] = (
+            (max(1, limit),) if ignore_cooldown else (now, max(1, limit))
+        )
         with self._connect() as connection:
             rows = self._execute(
                 connection,
-                """
+                f"""
                 SELECT id, source_url, resolved_image_url, source_name, pin_id,
                        image_mime_type, width, height, image_sha256, tags_json,
                        status, attempt_count, next_retry_at_utc, last_error,
@@ -829,11 +840,11 @@ class PostRepository:
                 FROM reference_assets
                 WHERE status = 'ready'
                   AND image_bytes IS NOT NULL
-                  AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?)
+                  {cooldown_filter}
                 ORDER BY use_count ASC, COALESCE(last_used_at_utc, '') ASC, id ASC
                 LIMIT ?
                 """,
-                (now, max(1, limit)),
+                params,
             ).fetchall()
         return [_row_to_reference_asset(row) for row in rows]
 

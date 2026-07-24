@@ -858,48 +858,76 @@ class ReferenceCatalog:
         exclude_ids: Sequence[int] = (),
         preferred_source_name: str = "",
         rng: Optional[random.Random] = None,
+        relaxed: bool = False,
     ) -> Optional[ReferenceAsset]:
         excluded = set(exclude_ids)
         mood_set = set(moods)
+
+        similar_garments = {
+            "t-shirt": {"t-shirt", "long-sleeve", "sweatshirt"},
+            "hoodie": {"hoodie", "zip-hoodie", "sweatshirt", "long-sleeve"},
+            "sweatshirt": {"sweatshirt", "hoodie", "t-shirt", "long-sleeve"},
+            "long-sleeve": {"long-sleeve", "t-shirt", "sweatshirt"},
+            "zip-hoodie": {"zip-hoodie", "hoodie", "sweatshirt"},
+            "cap": {"cap"},
+            "jacket": {"jacket", "hoodie", "sweatshirt"},
+        }.get(garment_type, {garment_type})
+
+        allowed_garments = similar_garments if relaxed else {garment_type}
+
         scored: list[tuple[float, ReferenceAsset]] = []
-        for asset in self.repository.list_ready_reference_metadata():
+        assets_list = self.repository.list_ready_reference_metadata(
+            ignore_cooldown=relaxed
+        )
+        for asset in assets_list:
             if asset.id in excluded:
                 continue
             tags = asset.tags
             garments = set(tags.get("garment_types", []))
-            if garment_type not in garments:
+            if not garments.intersection(allowed_garments):
                 continue
             gender = str(tags.get("gender", "unisex"))
             if target_gender != "unisex" and gender not in {target_gender, "unisex"}:
-                continue
+                if not relaxed:
+                    continue
+
             visibility = int(tags.get("print_area_visibility", 0) or 0)
-            if visibility < 55:
+            minimum_visibility = 45 if relaxed else (75 if print_side in {"front", "back"} else 55)
+            if visibility < minimum_visibility:
                 continue
 
             visible_side = str(tags.get("print_side_visible", "unclear"))
-            if garment_type == "cap":
-                allowed_sides = {"cap-front", "front", "both"}
-            elif print_side == "back":
-                allowed_sides = {"back", "both"}
-            elif print_side == "front":
-                allowed_sides = {"front", "both"}
+            if relaxed:
+                allowed_sides = (
+                    {"cap-front", "front", "both", "unclear"}
+                    if garment_type == "cap"
+                    else (
+                        {"back", "both", "unclear"}
+                        if print_side == "back"
+                        else {"front", "both", "cap-front", "unclear"}
+                    )
+                )
             else:
-                allowed_sides = {"front", "back", "both", "cap-front", "unclear"}
+                if garment_type == "cap":
+                    allowed_sides = {"cap-front", "front", "both"}
+                elif print_side == "back":
+                    allowed_sides = {"back", "both"}
+                elif print_side == "front":
+                    allowed_sides = {"front", "both"}
+                else:
+                    allowed_sides = {"front", "back", "both", "cap-front", "unclear"}
             if visible_side not in allowed_sides:
                 continue
 
             camera_angle = str(tags.get("camera_angle", ""))
-            if print_side == "back" and camera_angle not in {"rear", "three-quarter"}:
-                continue
+            if print_side == "back" and camera_angle not in {"rear", "three-quarter", "unclear"}:
+                if not relaxed:
+                    continue
             if print_side == "front" and camera_angle == "rear":
                 continue
 
-            minimum_visibility = 75 if print_side in {"front", "back"} else 55
-            if visibility < minimum_visibility:
-                continue
-
             framing = str(tags.get("framing", ""))
-            if garment_type != "cap" and framing == "full-body":
+            if garment_type != "cap" and framing == "full-body" and not relaxed:
                 continue
             framing_score = {
                 "waist-up": 45,
@@ -928,8 +956,6 @@ class ReferenceCatalog:
                 existing_coverage = int(
                     tags.get("existing_print_coverage_percent", 0) or 0
                 )
-                # Printed references remain usable when the garment color, side and
-                # panel are suitable. Plain garments are still strongly preferred.
                 score -= min(24, int(existing_coverage * 0.45))
             score -= crowd_penalty
             if season and tags.get("season") in {season, "all-season"}:
