@@ -497,7 +497,7 @@ class LocalMockupGenerator:
             # The local fallback may approve only a tiny old print. In that narrow
             # case the new target box is a safe approximation. Larger prints must
             # have their own exact geometry from the vision preflight.
-            if coverage_percent <= 12:
+            if coverage_percent <= 8:
                 cleanup_quad = self._scale_quad(
                     quad,
                     scale_x=1.10,
@@ -532,9 +532,9 @@ class LocalMockupGenerator:
         # OpenCV reconstruction is intentionally limited to small old graphics.
         # A large old print would leave a visible smooth patch outside the new art.
         if (
-            area_ratio > 0.12
-            or coverage_percent > 24
-            or old_to_new_ratio > 1.55
+            area_ratio > 0.08
+            or coverage_percent > 10
+            or old_to_new_ratio > 0.80
         ):
             raise LocalCompositeNeedsGemini(
                 "Чужой принт больше безопасной зоны локального удаления."

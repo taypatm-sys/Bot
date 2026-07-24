@@ -1207,12 +1207,18 @@ def build_router(
                     )
                 if candidate is None and requested_generation_mode == "local":
                     await status_message.edit_text(
-                        "Подготавливаю референсы для простого режима из вашей базы ссылок. "
-                        "Платная генерация не запускается."
+                        "Подготавливаю до двух наиболее подходящих референсов именно "
+                        "для этого макета. Платная генерация не запускается."
                     )
-                    for _ in range(6):
-                        if not await reference_catalog.process_next_simple_reference():
-                            break
+                    await reference_catalog.prepare_best_simple_candidates(
+                        garment_type=spec.garment_type,
+                        target_gender=direction.gender,
+                        moods=spec.moods,
+                        print_side=spec.side,
+                        shirt_color=spec.shirt_color,
+                        fit=spec.fit,
+                        limit=2,
+                    )
                     candidate = reference_catalog.select_reference(
                         garment_type=spec.garment_type,
                         target_gender=direction.gender,
@@ -1336,11 +1342,14 @@ def build_router(
                 if generation_error is None:
                     if requested_generation_mode == "local":
                         simple_stats = repository.simple_reference_stats()
-                        preparing = simple_stats.get("pending", 0) + simple_stats.get("processing", 0)
-                        if preparing:
+                        waiting_count = simple_stats.get("pending", 0)
+                        processing_count = simple_stats.get("processing", 0)
+                        if waiting_count or processing_count:
                             generation_error = (
-                                "База простых референсов еще готовится. "
-                                f"В очереди: {preparing}. Попробуйте снова через несколько минут."
+                                "Для этого макета подходящий простой референс пока не найден. "
+                                f"Ожидают подготовки: {waiting_count}, обрабатывается: {processing_count}. "
+                                "Бот продолжит подготовку в фоне. Можно выбрать сложный режим "
+                                "или повторить простой после появления подходящего уровня A/B."
                             )
                         else:
                             generation_error = (

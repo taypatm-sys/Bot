@@ -1125,7 +1125,8 @@ def build_model_photo_prompt(
     reference_setting = str(reference_tags.get("setting", "")).strip()
     if has_style_reference:
         reference_direction = (
-            "MANUALLY SELECTED PHOTO REFERENCE - REQUIRED:\n"
+            "MANUALLY SELECTED PHOTOGRAPHIC REFERENCE - REQUIRED:\n"
+            "- This manually selected photographic reference is mandatory and must control composition.\n"
             "- The final source image is not optional. Closely match its camera "
             "distance, crop, body orientation, pose, lens feel, background density "
             "and overall photographic composition. Do not invent a different street, "

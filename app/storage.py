@@ -826,6 +826,36 @@ class PostRepository:
                 return None
         return _row_to_reference_asset(row)
 
+    def claim_specific_simple_reference(
+        self, reference_id: int
+    ) -> Optional[ReferenceAsset]:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM reference_assets
+                WHERE id = ? AND status = 'ready'
+                  AND image_bytes IS NOT NULL
+                  AND simple_status = 'pending'
+                """,
+                (reference_id,),
+            ).fetchone()
+            if not row:
+                return None
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'processing', updated_at_utc = ?
+                WHERE id = ? AND simple_status = 'pending'
+                """,
+                (now, reference_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return _row_to_reference_asset(row)
+
     def store_simple_reference_variant(
         self,
         reference_id: int,
@@ -1279,6 +1309,34 @@ class PostRepository:
                 (now,),
             )
         return int(cursor.rowcount or 0)
+
+    def reset_legacy_simple_level_b_for_revalidation(self) -> int:
+        """Invalidate destructive V6.0 level-B previews once.
+
+        Older builds could mark a blurred or partially cleaned image as ready.
+        Level A references were never edited and remain valid.
+        """
+        if self.get_setting("simple_reference_validation_v2") == "1":
+            return 0
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE reference_assets
+                SET simple_status = 'pending', simple_ready = 0,
+                    simple_image_bytes = NULL, simple_image_mime_type = NULL,
+                    simple_thumbnail_bytes = NULL, simple_reason =
+                    'Повторная проверка после обновления алгоритма',
+                    simple_level = 'C', simple_quality_score = 0,
+                    lifecycle_state = 'raw', updated_at_utc = ?
+                WHERE status = 'ready' AND simple_ready = 1 AND simple_level = 'B'
+                """,
+                (now,),
+            )
+            count = int(cursor.rowcount or 0)
+        self.set_setting("simple_reference_validation_v2", "1")
+        return count
 
     def seed_presets(self, presets: Sequence[tuple[str, str, str]]) -> None:
         if self.get_setting("presets_seeded") == "1":
