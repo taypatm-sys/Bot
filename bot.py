@@ -45,6 +45,12 @@ async def main() -> None:
         bot_token=config.telegram_bot_token,
     )
     repository.recover_interrupted_posts()
+    reset_simple = repository.reset_legacy_simple_level_b_for_revalidation()
+    if reset_simple:
+        logging.getLogger(__name__).warning(
+            "Сброшено старых простых референсов уровня B для повторной проверки: %s",
+            reset_simple,
+        )
     repository.seed_presets(DEFAULT_PRODUCT_PRESETS)
 
     template_store = CaptionTemplateStore(
