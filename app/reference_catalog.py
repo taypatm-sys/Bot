@@ -1318,7 +1318,9 @@ class ReferenceCatalog:
         fit: str = "",
         rng: Optional[random.Random] = None,
     ) -> Optional[ReferenceAsset]:
-        excluded = set(exclude_ids)
+        rejected_user_ids = self.repository.get_rejected_reference_ids(garment_type)
+        liked_user_ids = self.repository.get_liked_reference_ids(garment_type)
+        excluded = set(exclude_ids).union(rejected_user_ids)
         mood_set = set(moods)
         scored: list[tuple[float, ReferenceAsset, list[str]]] = []
         for asset in self.repository.list_ready_reference_assets():

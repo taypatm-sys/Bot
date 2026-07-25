@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
+from app.ai_assistant import AIAssistant
 from app.analysis_coordinator import AnalysisCoordinator
 from app.local_mockup_generator import LocalMockupGenerator
 from app.config import Config, ConfigError
@@ -107,6 +108,11 @@ async def main() -> None:
         repository=repository,
         template_store=template_store,
     )
+    ai_assistant = AIAssistant(
+        api_key=config.gemini_api_key,
+        repository=repository,
+        model=config.gemini_model,
+    )
 
     dispatcher = Dispatcher()
     dispatcher.include_router(
@@ -119,6 +125,7 @@ async def main() -> None:
             reference_catalog=reference_catalog,
             publisher=publisher,
             template_store=template_store,
+            ai_assistant=ai_assistant,
         )
     )
 

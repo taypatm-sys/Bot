@@ -21,6 +21,8 @@ from aiogram.types import (
 
 from app.local_mockup_generator import LocalCompositeNeedsGemini, LocalMockupGenerator
 from app.config import Config
+from app.ai_assistant import AIAssistant
+from app.analysis_coordinator import AnalysisCoordinator
 from app.copywriter import ImageCopywriter
 from app.formatting import (
     TemplateError,
@@ -83,7 +85,34 @@ class DraftStates(StatesGroup):
     waiting_queue_price = State()
     waiting_queue_time = State()
     waiting_add_admin_id = State()
+    confirming_reference = State()
     preview = State()
+
+
+def reference_preview_keyboard(reference_id: int, mode: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👍 Использовать этот референс",
+                    callback_data=f"ref:approve:{mode}:{reference_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👎 Найти другой референс",
+                    callback_data=f"ref:reject:{mode}:{reference_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔍 Поиск референсов в Pinterest без API",
+                    callback_data="model:search-references",
+                )
+            ],
+            [InlineKeyboardButton(text="Отмена", callback_data="model:cancel")],
+        ]
+    )
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -805,6 +834,7 @@ def build_router(
     reference_catalog: ReferenceCatalog,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
+    ai_assistant: AIAssistant,
 ) -> Router:
     router = Router()
 
@@ -3682,10 +3712,189 @@ def build_router(
                 f"{format_local(scheduled_at, config.timezone)}."
             )
 
+    @router.callback_query(F.data.startswith("model:generate:"))
+    async def preview_and_confirm_reference(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await is_admin_callback(callback, config, repository):
+            return
+        mode = callback.data.split(":")[-1]
+        data = await state.get_data()
+        spec_dict = data.get("model_spec")
+        if not spec_dict:
+            await callback.answer("Черновик макета устарел. Отправьте макет заново.", show_alert=True)
+            return
+        spec = MockupSpec.from_dict(spec_dict)
+        direction_index = int(data.get("model_direction_index", 0))
+        directions = data.get("model_directions", [])
+        if not directions or direction_index >= len(directions):
+            await callback.answer("Направления не найдены.", show_alert=True)
+            return
+        direction = SimpleNamespace(**directions[direction_index])
+        
+        excluded_ids = list(data.get("model_excluded_ref_ids", []))
+        rejected_ids = list(repository.get_rejected_reference_ids(spec.garment_type))
+        all_excluded = set(excluded_ids).union(rejected_ids)
+
+        token = f"confirm:{callback.message.chat.id}:{secrets.token_hex(4)}"
+        candidate = reference_catalog.select_reference(
+            garment_type=spec.garment_type,
+            target_gender=direction.gender,
+            moods=spec.moods,
+            request_token=token,
+            print_side=spec.side,
+            exclude_ids=list(all_excluded),
+            simple_only=(mode == "local"),
+            shirt_color=spec.shirt_color,
+            fit=spec.fit,
+        )
+
+        if candidate is None:
+            if callback.message:
+                await callback.message.edit_text(
+                    "⚠️ <b>В базе пока нет готовых подходящих референсов.</b>\n\n"
+                    "Вы можете найти новые подходящие референсы через поиск Pinterest и прислать их боту:",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="🔍 Найти референсы в Pinterest",
+                                    callback_data="model:search-references",
+                                )
+                            ],
+                            [InlineKeyboardButton(text="Отмена", callback_data="model:cancel")],
+                        ]
+                    ),
+                )
+            await callback.answer()
+            return
+
+        await state.update_data(
+            confirming_mode=mode,
+            confirming_ref_id=candidate.id,
+            confirming_token=token,
+        )
+        await state.set_state(DraftStates.confirming_reference)
+
+        ref_image = candidate.simple_image_bytes or candidate.image_bytes
+        caption = (
+            f"📷 <b>Найден подходящий референс #{candidate.id}</b>\n\n"
+            f"• <b>Изделие:</b> {spec.garment_type}\n"
+            f"• <b>Категория:</b> {direction.gender}\n"
+            f"• <b>Ракурс/Стиль:</b> {candidate.tags.get('camera_angle', 'натуральный')}\n"
+            f"• <b>Видимость зоны:</b> {candidate.tags.get('print_area_visibility', 90)}%\n\n"
+            f"Использовать этот референс для создания фото?"
+        )
+        await callback.answer()
+        if callback.message:
+            if ref_image:
+                await callback.message.answer_photo(
+                    photo=BufferedInputFile(ref_image, filename=f"ref_{candidate.id}.jpg"),
+                    caption=caption,
+                    reply_markup=reference_preview_keyboard(candidate.id, mode),
+                )
+            else:
+                await callback.message.answer(
+                    caption,
+                    reply_markup=reference_preview_keyboard(candidate.id, mode),
+                )
+
+    @router.callback_query(F.data.startswith("ref:approve:"))
+    async def approve_reference_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await is_admin_callback(callback, config, repository):
+            return
+        _, _, mode, ref_id_str = callback.data.split(":", 3)
+        ref_id = int(ref_id_str)
+        data = await state.get_data()
+        spec_dict = data.get("model_spec")
+        garment_type = spec_dict.get("garment_type", "") if spec_dict else ""
+
+        repository.record_reference_feedback(ref_id, "liked", garment_type=garment_type)
+        await state.update_data(
+            model_confirmed_reference_id=ref_id,
+            model_confirmed_usage_token=data.get("confirming_token"),
+        )
+        await callback.answer("✅ Референс одобрен! Начинаю генерацию...", show_alert=False)
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            status_msg = await callback.message.answer("⚙️ Создаю фото на модели...")
+            await run_model_generation(
+                status_message=status_msg,
+                state=state,
+                requested_generation_mode=mode,
+                confirmed_reference_id=ref_id,
+                confirmed_usage_token=data.get("confirming_token"),
+            )
+
+    @router.callback_query(F.data.startswith("ref:reject:"))
+    async def reject_reference_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await is_admin_callback(callback, config, repository):
+            return
+        _, _, mode, ref_id_str = callback.data.split(":", 3)
+        ref_id = int(ref_id_str)
+        data = await state.get_data()
+        spec_dict = data.get("model_spec")
+        garment_type = spec_dict.get("garment_type", "") if spec_dict else ""
+
+        repository.record_reference_feedback(ref_id, "rejected", garment_type=garment_type)
+        excluded_ids = list(data.get("model_excluded_ref_ids", []))
+        excluded_ids.append(ref_id)
+        await state.update_data(model_excluded_ref_ids=excluded_ids)
+
+        await callback.answer("❌ Референс отклонен. Ищу следующий...", show_alert=False)
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await preview_and_confirm_reference(callback, state)
+
     @router.message()
-    async def fallback(message: Message) -> None:
+    async def fallback(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config, repository):
             return
+        current_state_name = await state.get_state() or ""
+        user_text = message.text.strip() if message.text else ""
+
+        if user_text:
+            intent_res = await ai_assistant.analyze_message(
+                chat_id=message.chat.id,
+                user_text=user_text,
+                current_state=current_state_name,
+            )
+
+            if intent_res.intent == "search_references":
+                await message.answer(
+                    intent_res.response_text,
+                    reply_markup=references_keyboard(),
+                )
+                return
+            elif intent_res.intent == "show_queue":
+                posts = repository.list_pending()
+                if not posts:
+                    await message.answer("Очередь запланированных постов пока пуста.", reply_markup=main_keyboard())
+                else:
+                    await message.answer(f"Запланировано постов в очереди: {len(posts)}", reply_markup=main_keyboard())
+                return
+            elif intent_res.intent == "show_settings":
+                await message.answer(
+                    "Раздел настроек и служебных функций бота:",
+                    reply_markup=settings_keyboard(),
+                )
+                return
+            elif intent_res.intent == "show_status":
+                await message.answer(
+                    reference_catalog.status_text(),
+                    reply_markup=references_keyboard(),
+                )
+                return
+            elif intent_res.intent == "ask_clarification":
+                await message.answer(
+                    intent_res.clarification_question or intent_res.response_text
+                )
+                return
+            elif intent_res.intent == "general_chat":
+                await message.answer(
+                    intent_res.response_text,
+                    reply_markup=main_keyboard(),
+                )
+                return
+
         await message.answer(
             "Отправьте фотографию для нового поста или выберите действие в меню.",
             reply_markup=main_keyboard(),

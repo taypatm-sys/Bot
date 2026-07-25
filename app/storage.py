@@ -370,6 +370,29 @@ class PostRepository:
                 )
                 """,
             )
+            self._execute(
+                connection,
+                f"""
+                CREATE TABLE IF NOT EXISTS reference_user_feedback (
+                    id {id_column},
+                    reference_id BIGINT NOT NULL,
+                    garment_type TEXT NOT NULL DEFAULT '',
+                    feedback_type TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at_utc TEXT NOT NULL
+                )
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE TABLE IF NOT EXISTS ai_dialog_memory (
+                    chat_id BIGINT PRIMARY KEY,
+                    history_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at_utc TEXT NOT NULL
+                )
+                """,
+            )
 
     def _migrate_post_columns(self, connection: Any) -> None:
         definitions = {
@@ -539,6 +562,93 @@ class PostRepository:
                 (int(admin_id),),
             ).fetchone()
             return bool(row)
+
+    def record_reference_feedback(
+        self,
+        reference_id: int,
+        feedback_type: str,
+        *,
+        garment_type: str = "",
+        reason: str = "",
+    ) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO reference_user_feedback(
+                    reference_id, garment_type, feedback_type, reason, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (reference_id, garment_type, feedback_type, reason, now),
+            )
+
+    def get_rejected_reference_ids(self, garment_type: str = "") -> set[int]:
+        with self._connect() as connection:
+            if garment_type:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT DISTINCT reference_id FROM reference_user_feedback
+                    WHERE feedback_type = 'rejected' AND (garment_type = ? OR garment_type = '')
+                    """,
+                    (garment_type,),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    "SELECT DISTINCT reference_id FROM reference_user_feedback WHERE feedback_type = 'rejected'",
+                ).fetchall()
+        return {int(row["reference_id"]) for row in rows}
+
+    def get_liked_reference_ids(self, garment_type: str = "") -> set[int]:
+        with self._connect() as connection:
+            if garment_type:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT DISTINCT reference_id FROM reference_user_feedback
+                    WHERE feedback_type = 'liked' AND (garment_type = ? OR garment_type = '')
+                    """,
+                    (garment_type,),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    "SELECT DISTINCT reference_id FROM reference_user_feedback WHERE feedback_type = 'liked'",
+                ).fetchall()
+        return {int(row["reference_id"]) for row in rows}
+
+    def get_chat_history(self, chat_id: int) -> list[dict]:
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                "SELECT history_json FROM ai_dialog_memory WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        if row and row["history_json"]:
+            try:
+                return json.loads(row["history_json"])
+            except Exception:
+                return []
+        return []
+
+    def save_chat_history(self, chat_id: int, history: list[dict]) -> None:
+        now = _iso(datetime.now(UTC))
+        trimmed = history[-20:]
+        history_str = json.dumps(trimmed, ensure_ascii=False)
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO ai_dialog_memory(chat_id, history_json, updated_at_utc)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    history_json = excluded.history_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (chat_id, history_str, now),
+            )
 
     def seed_setting(self, key: str, value: str) -> None:
         now = _iso(datetime.now(UTC))

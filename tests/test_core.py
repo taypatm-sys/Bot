@@ -1301,5 +1301,41 @@ class AdminManagementTests(unittest.TestCase):
                 repository.close()
 
 
+class UserFeedbackAndAIMemoryTests(unittest.TestCase):
+    def test_reference_feedback_tracking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            try:
+                repository.initialize()
+                self.assertEqual(repository.get_rejected_reference_ids("t-shirt"), set())
+                self.assertEqual(repository.get_liked_reference_ids("t-shirt"), set())
+
+                repository.record_reference_feedback(10, "liked", garment_type="t-shirt")
+                repository.record_reference_feedback(20, "rejected", garment_type="t-shirt")
+
+                self.assertEqual(repository.get_liked_reference_ids("t-shirt"), {10})
+                self.assertEqual(repository.get_rejected_reference_ids("t-shirt"), {20})
+            finally:
+                repository.close()
+
+    def test_chat_history_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            try:
+                repository.initialize()
+                self.assertEqual(repository.get_chat_history(12345), [])
+
+                history = [
+                    {"role": "user", "content": "Привет"},
+                    {"role": "assistant", "content": "Здравствуйте!"},
+                ]
+                repository.save_chat_history(12345, history)
+                loaded = repository.get_chat_history(12345)
+                self.assertEqual(len(loaded), 2)
+                self.assertEqual(loaded[0]["content"], "Привет")
+            finally:
+                repository.close()
+
+
 if __name__ == "__main__":
     unittest.main()
