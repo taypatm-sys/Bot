@@ -1495,24 +1495,6 @@ class ReferenceCatalog:
 
         if season and tags.get("season") in {season, "all-season"}:
             score += 4
-        if shirt_color:
-            try:
-                color_match = self._fallback_color_match(
-                    image_bytes=asset.simple_image_bytes or asset.image_bytes,
-                    target_color=shirt_color,
-                    torso=self._fallback_torso_box(
-                        framing=str(tags.get("framing", "waist-up")),
-                        camera_angle=str(tags.get("camera_angle", "front")),
-                    ),
-                )
-            except Exception:
-                color_match = False
-            if color_match:
-                score += 5
-                reasons.append("цвет близок к макету")
-        if fit and fit.casefold() in str(tags.get("composition_notes", "")).casefold():
-            score += 3
-            reasons.append("крой похож")
 
         learning = min(10, asset.success_count * 3) - min(10, asset.failure_count * 2)
         score += learning
