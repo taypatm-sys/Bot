@@ -806,6 +806,8 @@ def build_router(
     publisher: Publisher,
     template_store: CaptionTemplateStore,
 ) -> Router:
+    router = Router()
+
     required_draft_fields = {"photo_file_id", "title", "description"}
 
     async def restore_active_draft(
