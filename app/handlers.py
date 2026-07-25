@@ -806,17 +806,6 @@ def build_router(
     publisher: Publisher,
     template_store: CaptionTemplateStore,
 ) -> Router:
-    router = Router()
-
-    _mod_is_admin_message = is_admin_message
-    _mod_is_admin_callback = is_admin_callback
-
-    async def is_admin_message(message: Message, _config: Config = config) -> bool:
-        return await _mod_is_admin_message(message, config, repository)
-
-    async def is_admin_callback(callback: CallbackQuery, _config: Config = config) -> bool:
-        return await _mod_is_admin_callback(callback, config, repository)
-
     required_draft_fields = {"photo_file_id", "title", "description"}
 
     async def restore_active_draft(
@@ -1670,7 +1659,7 @@ def build_router(
 
     @router.message(CommandStart())
     async def start(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
@@ -1690,7 +1679,7 @@ def build_router(
 
     @router.message(Command("cancel"))
     async def cancel_command(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
@@ -1699,7 +1688,7 @@ def build_router(
 
     @router.message(Command("check"))
     async def check_settings(message: Message, bot: Bot) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             repository.get_setting("caption_template")
@@ -1762,7 +1751,7 @@ def build_router(
 
     @router.message(F.text == "Настройки")
     async def show_settings(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         await message.answer(
@@ -1772,7 +1761,7 @@ def build_router(
 
     @router.callback_query(F.data == "settings:close")
     async def close_settings(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await callback.answer()
         if callback.message:
@@ -1780,7 +1769,7 @@ def build_router(
 
     @router.callback_query(F.data == "settings:presets")
     async def settings_presets(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         presets = repository.list_presets()
         if presets:
@@ -1799,7 +1788,7 @@ def build_router(
 
     @router.callback_query(F.data == "settings:template")
     async def settings_template(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await callback.answer()
         if callback.message:
@@ -1811,7 +1800,7 @@ def build_router(
 
     @router.callback_query(F.data == "settings:references")
     async def settings_references(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await callback.answer()
         if callback.message:
@@ -1822,7 +1811,7 @@ def build_router(
 
     @router.callback_query(F.data == "settings:check")
     async def settings_check(callback: CallbackQuery, bot: Bot) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         ready_references = repository.reference_stats().get("ready", 0)
         last_reference_id = repository.get_setting("last_mockup_reference_id") or "нет"
@@ -1960,7 +1949,7 @@ def build_router(
     @router.message(Command("references"))
     @router.message(F.text == "Референсы")
     async def references_status(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         await message.answer(
@@ -1970,7 +1959,7 @@ def build_router(
 
     @router.callback_query(F.data == "references:refresh")
     async def refresh_references(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await callback.answer("Статус обновлен")
         if callback.message:
@@ -1981,7 +1970,7 @@ def build_router(
 
     @router.callback_query(F.data == "references:retry")
     async def retry_references(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         counts = reference_catalog.resume_now()
         count = sum(counts.values())
@@ -2001,7 +1990,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("references:view:"))
     async def view_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2015,7 +2004,7 @@ def build_router(
 
     @router.callback_query(F.data == "references:prepare-all")
     async def prepare_all_references(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         queued = reference_catalog.prepare_all_simple()
         await callback.answer(f"Поставлено в очередь: {queued}", show_alert=not bool(queued))
@@ -2028,7 +2017,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("references:prepare:"))
     async def prepare_one_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2052,7 +2041,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("references:delete:"))
     async def delete_reference(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2077,7 +2066,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2126,7 +2115,7 @@ def build_router(
 
     @router.callback_query(F.data == "references:add")
     async def add_references(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await state.set_state(DraftStates.waiting_reference_list)
         await callback.answer()
@@ -2207,7 +2196,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         document = message.document
         filename = document.file_name or "references.txt"
@@ -2239,7 +2228,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_reference_list, F.text)
     async def receive_reference_links(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await accept_reference_text(
             message,
@@ -2252,7 +2241,7 @@ def build_router(
     @router.message(F.text == "Запланированные")
     @router.message(F.text == "Очередь")
     async def queue(message: Message) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         posts = repository.list_pending()
         if not posts:
@@ -2267,7 +2256,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:preview:"))
     async def preview_queued(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         post_id = int(callback.data.rsplit(":", 1)[1])
         post = repository.get(post_id)
@@ -2298,7 +2287,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:edit:"))
     async def edit_queued(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         post_id = int(callback.data.rsplit(":", 1)[1])
         post = repository.get(post_id)
@@ -2314,7 +2303,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:field:"))
     async def choose_queue_field(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         _, _, field, post_id_text = callback.data.split(":", 3)
         post_id = int(post_id_text)
@@ -2355,7 +2344,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_queue_title, F.text)
     async def receive_queue_title(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         data = await state.get_data()
         title = " ".join(message.text.strip().split())
@@ -2379,7 +2368,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_queue_description, F.text)
     async def receive_queue_description(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         description = " ".join(message.text.strip().split())
         if not description or len(description) > 200:
@@ -2397,7 +2386,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_queue_size, F.text)
     async def receive_queue_size(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             size = normalize_size(message.text)
@@ -2414,7 +2403,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_queue_price, F.text)
     async def receive_queue_price(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             price = normalize_price(message.text)
@@ -2431,7 +2420,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:time:"))
     async def change_queue_time(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         _, _, post_id_text, value = callback.data.split(":", 3)
         post_id = int(post_id_text)
@@ -2455,7 +2444,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_queue_time, F.text)
     async def receive_queue_time(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             scheduled_at = parse_local_datetime(message.text, config.timezone)
@@ -2472,7 +2461,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:publish:"))
     async def publish_queued_now(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         post_id = int(callback.data.rsplit(":", 1)[1])
         if not repository.reschedule(post_id, datetime.now(UTC)):
@@ -2489,7 +2478,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:copy:"))
     async def copy_queued(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         post_id = int(callback.data.rsplit(":", 1)[1])
         post = repository.get(post_id)
@@ -2516,7 +2505,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("queue:cancel:"))
     async def cancel_queued(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         post_id = int(callback.data.rsplit(":", 1)[1])
         cancelled = repository.cancel(post_id)
@@ -2527,7 +2516,7 @@ def build_router(
     @router.message(Command("template"))
     @router.message(F.text == "Шаблон")
     async def show_template(message: Message) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await message.answer(
             "Текущий шаблон:\n\n"
@@ -2537,7 +2526,7 @@ def build_router(
 
     @router.message(Command("settemplate"))
     async def set_template(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.set_state(DraftStates.waiting_template)
         await message.answer(
@@ -2551,7 +2540,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_template, F.text)
     async def save_template(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             template_store.set(message.text)
@@ -2566,7 +2555,7 @@ def build_router(
     @router.message(Command("presets"))
     @router.message(F.text == "Пресеты")
     async def show_presets(message: Message) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         presets = repository.list_presets()
         if presets:
@@ -2581,7 +2570,7 @@ def build_router(
 
     @router.callback_query(F.data == "preset:add")
     async def add_preset(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await state.clear()
         await state.set_state(DraftStates.waiting_preset)
@@ -2595,7 +2584,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_preset, F.text)
     async def receive_preset(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         parts = [part.strip() for part in message.text.split("|")]
         if len(parts) != 3:
@@ -2625,7 +2614,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("preset:delete:"))
     async def delete_preset(callback: CallbackQuery) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         preset_id = int(callback.data.rsplit(":", 1)[1])
         deleted = repository.delete_preset(preset_id)
@@ -2639,7 +2628,7 @@ def build_router(
     @router.message(Command("model"))
     @router.message(F.text == "Фото на модели")
     async def request_model_mockup(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
@@ -2743,7 +2732,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         if (
             message.photo[-1].file_size
@@ -2765,7 +2754,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         document = message.document
         mime_type = document.mime_type or ""
@@ -2788,7 +2777,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2820,7 +2809,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await state.update_data(reference_return_to_model=True)
         await state.set_state(DraftStates.waiting_reference_list)
@@ -2836,7 +2825,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2862,7 +2851,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -2896,7 +2885,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_model_print, F.photo)
     async def reject_model_print_photo(message: Message) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await message.answer(
             "Отправьте принт именно как файл PNG, а не как сжатую фотографию."
@@ -2908,7 +2897,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         document = message.document
         filename = (document.file_name or "").casefold()
@@ -3004,7 +2993,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3070,7 +3059,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3103,7 +3092,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3122,7 +3111,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3151,7 +3140,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3178,7 +3167,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if callback.message:
             data = await restore_model_draft(state, callback.message.chat.id)
@@ -3204,7 +3193,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3241,7 +3230,7 @@ def build_router(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         if not callback.message:
             await callback.answer()
@@ -3265,7 +3254,7 @@ def build_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         parts = callback.data.split(":")
         if len(parts) != 4:
@@ -3311,7 +3300,7 @@ def build_router(
 
     @router.message(F.text == "Создать пост")
     async def create_post_hint(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
@@ -3319,7 +3308,7 @@ def build_router(
 
     @router.message(F.photo)
     async def receive_photo(message: Message, state: FSMContext, bot: Bot) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await state.clear()
         repository.clear_active_draft(message.chat.id)
@@ -3345,7 +3334,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("preset:use:"))
     async def use_preset(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3369,7 +3358,7 @@ def build_router(
     async def manual_product_settings(
         callback: CallbackQuery, state: FSMContext
     ) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3387,7 +3376,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("size:"))
     async def choose_size(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3424,7 +3413,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_custom_size, F.text)
     async def receive_custom_size(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             size = normalize_size(message.text)
@@ -3442,7 +3431,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_price, F.text)
     async def receive_price(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             price = normalize_price(message.text)
@@ -3455,7 +3444,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("time:"))
     async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3488,7 +3477,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_custom_time, F.text)
     async def receive_custom_time(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             scheduled_at = parse_local_datetime(message.text, config.timezone)
@@ -3501,7 +3490,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:text")
     async def edit_text(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3520,7 +3509,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_text_edit, F.text)
     async def receive_text_edit(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         title = " ".join(message.text.strip().split())
         if not title or len(title) > 100:
@@ -3537,7 +3526,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:description")
     async def edit_description(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3553,7 +3542,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_description_edit, F.text)
     async def receive_description_edit(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         description = " ".join(message.text.strip().split())
         if not description or len(description) > 200:
@@ -3565,7 +3554,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:size")
     async def edit_size(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3583,7 +3572,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:price")
     async def edit_price(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3599,7 +3588,7 @@ def build_router(
 
     @router.message(DraftStates.waiting_price_edit, F.text)
     async def receive_price_edit(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         try:
             price = normalize_price(message.text)
@@ -3612,7 +3601,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:time")
     async def edit_time(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3627,7 +3616,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:cancel")
     async def cancel_draft(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         await state.clear()
         chat_id = (
@@ -3640,7 +3629,7 @@ def build_router(
 
     @router.callback_query(F.data == "draft:confirm")
     async def confirm_draft(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config):
+        if not await is_admin_callback(callback, config, repository):
             return
         chat_id = (
             callback.message.chat.id if callback.message else callback.from_user.id
@@ -3693,7 +3682,7 @@ def build_router(
 
     @router.message()
     async def fallback(message: Message) -> None:
-        if not await is_admin_message(message, config):
+        if not await is_admin_message(message, config, repository):
             return
         await message.answer(
             "Отправьте фотографию для нового поста или выберите действие в меню.",
