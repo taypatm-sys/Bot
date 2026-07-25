@@ -111,7 +111,7 @@ class ReferenceTags(BaseModel):
     gender: Literal["women", "men", "unisex"]
     moods: list[MoodTag] = Field(min_length=1, max_length=4)
     pose_kind: Literal["sitting", "walking", "activity", "standing", "close-up"]
-    action: str = Field(min_length=1, max_length=120)
+    action: str = Field(min_length=1, max_length=350)
     location_category: Literal[
         "home",
         "cafe",
@@ -124,7 +124,7 @@ class ReferenceTags(BaseModel):
         "studio",
         "other",
     ]
-    setting: str = Field(min_length=1, max_length=160)
+    setting: str = Field(min_length=1, max_length=350)
     camera_angle: Literal[
         "front",
         "rear",
@@ -141,9 +141,9 @@ class ReferenceTags(BaseModel):
     print_area_visibility: int = Field(ge=0, le=100)
     garment_is_plain: bool = False
     existing_print_coverage_percent: int = Field(default=0, ge=0, le=100)
-    composition_notes: str = Field(min_length=1, max_length=240)
+    composition_notes: str = Field(min_length=1, max_length=600)
     usable: bool
-    unusable_reason: str = Field(default="", max_length=240)
+    unusable_reason: str = Field(default="", max_length=600)
 
 
 class PlacementPoint(BaseModel):
@@ -1802,9 +1802,10 @@ class ReferenceCatalog:
             f"The source print uses about {print_width_percent}% of the garment width, "
             f"{print_height_percent}% of its height and begins about "
             f"{print_top_offset_percent}% below the collar. "
-            "Judge whether this photo can be used in two ways: as a pose reference for "
-            "Gemini, and as a direct local composite where only the garment artwork is "
-            "replaced. For a back print, the back must be clearly visible from rear or "
+            "Do NOT reject or penalize the photo based on garment color or fit; Gemini will automatically "
+            "modify the garment color and fit during final image generation. "
+            "Judge compatibility purely on pose clarity, camera angle, and an unobstructed garment panel. "
+            "For a back print, the back must be clearly visible from rear or "
             "rear three-quarter view. For a front print, the front panel must be clearly "
             "visible and free of long hanging necklaces, pendants or chains hanging down over the chest print area. "
             "Reject completely unclear orientation, extreme full-body shots, severe "

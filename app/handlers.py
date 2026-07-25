@@ -120,7 +120,6 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="Создать пост"),
-                KeyboardButton(text="Фото на модели"),
             ],
             [
                 KeyboardButton(text="Очередь"),
@@ -2687,6 +2686,8 @@ def build_router(
             )
 
     @router.message(Command("model"))
+    @router.message(Command("start_post"))
+    @router.message(F.text == "Создать пост")
     @router.message(F.text == "Фото на модели")
     async def request_model_mockup(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config, repository):
@@ -2696,9 +2697,8 @@ def build_router(
         repository.clear_model_draft(message.chat.id)
         await state.set_state(DraftStates.waiting_model_mockup)
         await message.answer(
-            "Шаг 1 из 2. Отправьте фото вещи с уже размещенным принтом.\n"
-            "Исходное фото сохранит цвет, ткань, крой и сам принт.\n"
-            "Отдельный PNG не требуется."
+            "Отправьте фото вещи с макетом принта.\n"
+            "Бот подберет подходящую модель и сгенерирует финальный пост."
         )
 
     async def accept_model_mockup(
@@ -3358,14 +3358,6 @@ def build_router(
             image_bytes=buffer.getvalue(),
             mime_type="image/jpeg",
         )
-
-    @router.message(F.text == "Создать пост")
-    async def create_post_hint(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config, repository):
-            return
-        await state.clear()
-        repository.clear_active_draft(message.chat.id)
-        await message.answer("Отправьте фотографию будущего поста.")
 
     @router.message(F.photo)
     async def receive_photo(message: Message, state: FSMContext, bot: Bot) -> None:

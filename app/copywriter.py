@@ -94,9 +94,9 @@ class ProductCopy(BaseModel):
         "Куртка",
         "Шопер",
     ]
-    design_name: str = Field(min_length=1, max_length=55)
-    mood_description: str = Field(min_length=1, max_length=110)
-    theme_hashtag: str = Field(min_length=1, max_length=40)
+    design_name: str = Field(min_length=1, max_length=120)
+    mood_description: str = Field(min_length=1, max_length=300)
+    theme_hashtag: str = Field(min_length=1, max_length=80)
     target_audience: Literal["men", "women", "unisex"] = Field(
         default="unisex",
         description="Предполагаемая целевая аудитория: men (мужская/спорт/мемы), women (женская), unisex (универсальная)",
