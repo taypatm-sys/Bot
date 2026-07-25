@@ -1357,7 +1357,7 @@ class ReferenceCatalog:
             if print_side == "front" and camera_angle == "rear":
                 continue
 
-            minimum_visibility = 75 if print_side in {"front", "back"} else 55
+            minimum_visibility = 55 if print_side in {"front", "back"} else 45
             if visibility < minimum_visibility:
                 continue
 
@@ -1562,7 +1562,7 @@ class ReferenceCatalog:
             if print_side == "back"
             else camera_angle not in {"rear", "side", "unclear"}
         )
-        compatible = bool(tags.get("usable", True)) and side_ok and angle_ok and visibility >= 75
+        compatible = bool(tags.get("usable", True)) and side_ok and angle_ok and visibility >= 55
 
         torso = self._fallback_torso_box(framing=framing, camera_angle=camera_angle)
         target_box = self._fallback_print_box(
@@ -1614,9 +1614,9 @@ class ReferenceCatalog:
                 fallback_reasons.append(
                     f"по тегам ракурс '{camera_angle}' не подходит для принта {print_side}"
                 )
-            if visibility < 75:
+            if visibility < 55:
                 fallback_reasons.append(
-                    f"по тегам видимость зоны принта ({visibility}%) ниже 75%"
+                    f"по тегам видимость зоны принта ({visibility}%) ниже 55%"
                 )
             reason = (
                 "Резервная проверка тегов: " + "; ".join(fallback_reasons)
@@ -1806,9 +1806,11 @@ class ReferenceCatalog:
             "Gemini, and as a direct local composite where only the garment artwork is "
             "replaced. For a back print, the back must be clearly visible from rear or "
             "rear three-quarter view. For a front print, the front panel must be clearly "
-            "visible. Reject unclear orientation, distant full-body shots, crossed arms, "
-            "hair, bags or props covering the print area, crowds, collages, drawings and "
-            "low-quality images. print_area_visibility is the usable torso percentage. "
+            "visible. Reject only completely unclear orientation, extreme full-body shots, severe "
+            "crowd/collage obstructions, or unreadable images. Be reasonably permissive: allow minor "
+            "accessories (necklaces, watches), small handheld props (coffee cups, phones) and mild "
+            "arm or hair overlap as long as the main garment panel is mostly visible and usable for "
+            "artwork placement. print_area_visibility is the usable torso percentage. "
             "target_print_box is the exact normalized rectangle where the new artwork "
             "should sit. target_print_quad contains exactly four normalized points in "
             "this order: top-left, top-right, bottom-right, bottom-left. The quad must "
@@ -1828,7 +1830,7 @@ class ReferenceCatalog:
             "with an existing print only when its exact box or quad is supplied, it is not more "
             "than about 1.5 times the new target area, the garment "
             "color matches, fabric reconstruction is safe, perspective is mild, visibility is "
-            "at least 88%, and there is no occlusion or severe fold. Keep reason short and objective."
+            "at least 88%, and there is no occlusion or severe fold. Keep reason short, objective and written in Russian."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,
@@ -1866,7 +1868,7 @@ class ReferenceCatalog:
             result.compatible
             and side_ok
             and angle_ok
-            and result.print_area_visibility >= 75
+            and result.print_area_visibility >= 55
         )
         quad_valid = len(result.target_print_quad) in {0, 4}
         existing_quad_valid = len(result.existing_print_quad) in {0, 4}
@@ -1939,9 +1941,9 @@ class ReferenceCatalog:
                 rejection_reasons.append(
                     f"ракурс '{angle_label}' не подходит для принта {print_side}"
                 )
-            if result.print_area_visibility < 75:
+            if result.print_area_visibility < 55:
                 rejection_reasons.append(
-                    f"видимость зоны принта ({result.print_area_visibility}%) ниже 75%"
+                    f"видимость зоны принта ({result.print_area_visibility}%) ниже 55%"
                 )
             if not result.compatible:
                 gemini_reason = (result.reason or "").strip()

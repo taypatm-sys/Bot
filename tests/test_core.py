@@ -99,7 +99,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
                 "usable": True,
                 "print_side_visible": "front",
                 "camera_angle": "front",
-                "print_area_visibility": 60,
+                "print_area_visibility": 40,
             },
             use_count=0,
             last_used_at_utc=None,
@@ -113,7 +113,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
         )
         self.assertFalse(compat.compatible)
         self.assertIn("спина", compat.reason)
-        self.assertIn("60%", compat.reason)
+        self.assertIn("40%", compat.reason)
 
 
 class FormattingTests(unittest.TestCase):

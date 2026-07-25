@@ -926,6 +926,9 @@ def build_router(
         selected = None
         selected_compatibility = None
         selected_token = ""
+        best_candidate = None
+        best_compatibility = None
+        best_token = ""
         reject_reasons: list[str] = []
         for attempt in range(1, 7):
             token = f"preview:{message.chat.id}:{secrets.token_hex(5)}:{attempt}"
@@ -979,23 +982,45 @@ def build_router(
             if not compatibility.compatible:
                 excluded_ids.append(candidate.id)
                 reject_reasons.append(f"#{candidate.id}: {compatibility.reason}")
-                repository.release_reference_reservation(
-                    candidate.id,
-                    token,
-                    outcome="preview_rejected",
-                )
+                if best_candidate is None:
+                    best_candidate = candidate
+                    best_compatibility = compatibility
+                    best_token = token
+                else:
+                    repository.release_reference_reservation(
+                        candidate.id,
+                        token,
+                        outcome="preview_rejected",
+                    )
                 continue
             selected = candidate
             selected_compatibility = compatibility
             selected_token = token
             break
 
-        if selected is None or selected_compatibility is None:
-            detail = (
-                "Последние причины:\n" + "\n".join(reject_reasons[-3:])
-                if reject_reasons
-                else "Добавьте новые референсы."
+        if selected is None and best_candidate is not None:
+            selected = best_candidate
+            selected_compatibility = best_compatibility.model_copy(
+                update={
+                    "compatible": True,
+                    "reason": f"Использован референс #{best_candidate.id} (предупреждение: {best_compatibility.reason})",
+                }
             )
+            selected_token = best_token
+
+        if selected is None or selected_compatibility is None:
+            if reject_reasons:
+                detail = "Последние причины:\n" + "\n".join(reject_reasons[-3:])
+            else:
+                side_str = "спереди" if spec.side == "front" else "сзади"
+                gender_str = {"women": "женский", "men": "мужской", "unisex": "унисекс"}.get(direction.gender, direction.gender)
+                detail = (
+                    f"В базе нет доступных референсов под выбранные параметры:\n"
+                    f"• Изделие: {spec.garment_type}\n"
+                    f"• Пол: {gender_str}\n"
+                    f"• Сторона принта: {side_str}\n\n"
+                    f"Добавьте новые референсы в каталог."
+                )
             await waiting.edit_text(
                 "Подходящий референс не найден. Генерация не запускалась.\n\n"
                 + detail
