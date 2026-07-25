@@ -192,3 +192,67 @@ def test_legacy_level_b_is_reset_once() -> None:
     assert asset.simple_image_bytes is None
     assert repository.reset_legacy_simple_level_b_for_revalidation() == 0
     repository.close()
+
+
+def test_postgres_simple_preparation_uses_numeric_boolean_comparison(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute(self, query, params=()):
+            self.calls.append((query, tuple(params)))
+            return self
+
+    connection = FakeConnection()
+    repository = PostRepository("postgresql://example.invalid/test")
+
+    @contextmanager
+    def fake_connect():
+        yield connection
+
+    monkeypatch.setattr(repository, "_connect", fake_connect)
+    repository.store_simple_reference_variant(
+        7,
+        image_bytes=b"prepared",
+        image_mime_type="image/jpeg",
+        thumbnail_bytes=b"thumb",
+        ready=True,
+        reason="готово",
+        level="A",
+        quality_score=90,
+    )
+
+    query, params = connection.calls[-1]
+    assert "CASE WHEN %s = 1 THEN 'prepared'" in query
+    assert params[8] == 1
+
+
+def test_postgres_mark_reference_ready_uses_numeric_boolean_comparison(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute(self, query, params=()):
+            self.calls.append((query, tuple(params)))
+            return self
+
+    connection = FakeConnection()
+    repository = PostRepository("postgresql://example.invalid/test")
+
+    @contextmanager
+    def fake_connect():
+        yield connection
+
+    monkeypatch.setattr(repository, "_connect", fake_connect)
+    repository.mark_reference_ready(
+        9,
+        tags={"usable": True, "garment_types": ["t-shirt"]},
+    )
+
+    query, params = connection.calls[-1]
+    assert "CASE WHEN %s = 1 THEN 'pending'" in query
+    assert params[3] == 1

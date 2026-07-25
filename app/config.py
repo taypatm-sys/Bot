@@ -251,7 +251,7 @@ class Config:
             pinterest_access_token=os.getenv("PINTEREST_ACCESS_TOKEN", "").strip(),
             pinterest_search_enabled=_bool_env(
                 "PINTEREST_SEARCH_ENABLED",
-                os.getenv("PINTEREST_SEARCH_ENABLED", "true"),
+                os.getenv("PINTEREST_SEARCH_ENABLED", "false"),
                 default=True,
             ),
             pinterest_country_code=(

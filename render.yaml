@@ -31,18 +31,6 @@ services:
         value: 1K
       - key: MOCKUP_VARIANTS
         value: 1
-      - key: PINTEREST_SEARCH_ENABLED
-        value: true
-      - key: PINTEREST_ACCESS_TOKEN
-        sync: false
-      - key: PINTEREST_COUNTRY_CODE
-        value: US
-      - key: PINTEREST_SEARCH_INTERVAL_SECONDS
-        value: 21600
-      - key: PINTEREST_TARGET_POOL_SIZE
-        value: 160
-      - key: PINTEREST_QUERIES_PER_CYCLE
-        value: 2
       - key: REFERENCE_IMPORT_DELAY_SECONDS
         value: 5
       - key: REFERENCE_IDLE_INTERVAL_SECONDS

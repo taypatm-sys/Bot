@@ -939,46 +939,22 @@ _PHOTO_SCENARIOS = (
 )
 
 _PEOPLE = {
-    "women": {
-        "18-24": (
-            "a fictional Central Asian young woman around 20 years old with an ordinary face, natural youthful skin, dark brows and long dark hair in a relaxed casual style",
-            "a fictional young woman in her early twenties (around 22) with a natural clear face, minimal makeup, subtle freckles and a dark bob haircut",
-            "a fictional Central Asian woman around 21 with a fresh everyday face and dark hair tied in a casual high ponytail",
-        ),
-        "25-34": (
-            "a fictional Central Asian woman in her mid twenties with an ordinary distinctive face, natural skin and dark hair",
-            "a fictional Central Asian woman in her early thirties with a softly angular face, visible skin texture and dark wavy hair",
-            "a fictional woman in her late twenties with a round ordinary face and dark shoulder-length hair",
-        ),
-        "35-44": (
-            "a fictional Central Asian woman in her mid thirties with an expressive everyday face and dark hair tied loosely",
-            "a fictional Central Asian woman around forty with a confident ordinary face, fine skin lines and dark hair",
-        ),
-        "adult-universal": (
-            "a fictional Central Asian young woman in her early twenties with a fresh natural face, dark brows and dark hair in a relaxed casual style",
-            "a fictional woman in her mid twenties with an ordinary clear face, natural skin texture and dark hair",
-        ),
-    },
-    "men": {
-        "18-24": (
-            "a fictional Central Asian young man around 20 years old with a youthful natural face, smooth skin and short dark textured hair",
-            "a fictional young man in his early twenties (around 22) with a relaxed casual look, clear natural skin and dark wavy hair",
-            "a fictional Central Asian young man around 21 with an everyday youthful face, clean-shaven and short dark hair",
-        ),
-        "25-34": (
-            "a fictional Central Asian man in his mid twenties with an ordinary distinctive face, natural skin and short dark hair",
-            "a fictional man in his early thirties with a softly angular face, dark wavy hair and light stubble",
-            "a fictional Central Asian man in his late twenties with a round ordinary face and dark short hair",
-        ),
-        "35-44": (
-            "a fictional man in his mid thirties with visible skin texture, close-cropped dark hair and a short beard",
-            "a fictional Central Asian man in his late thirties with an everyday face and short dark hair",
-        ),
-        "adult-universal": (
-            "a fictional Central Asian young man in his early to mid twenties with a clean natural face and short dark hair",
-            "a fictional man in his mid twenties with a relaxed everyday face, natural skin and dark hair",
-        ),
-    },
+    "women": (
+        "a fictional Central Asian woman in her mid twenties with an ordinary distinctive face, natural skin and dark hair",
+        "a fictional Central Asian woman in her early thirties with a softly angular face, visible skin texture and dark wavy hair",
+        "a fictional woman in her late twenties with a round ordinary face, subtle freckles and a dark bob haircut",
+        "a fictional Central Asian woman in her mid thirties with an expressive everyday face and dark hair tied loosely",
+        "a fictional woman in her early twenties with natural brows, a small facial asymmetry and long dark hair",
+        "a fictional Central Asian woman around forty with a confident ordinary face, fine skin lines and dark hair",
+    ),
+    "men": (
+        "a fictional Central Asian man in his mid twenties with an ordinary distinctive face, natural skin and short dark hair",
+        "a fictional man in his early thirties with a softly angular face, dark wavy hair and light stubble",
+        "a fictional Central Asian man in his late twenties with a round ordinary face and dark curly hair",
+        "a fictional man in his mid thirties with visible skin texture, close-cropped dark hair and a short beard",
+        "a fictional Central Asian man in his early twenties with a small facial asymmetry and medium-length dark hair",
+        "a fictional Central Asian man around forty with an everyday face, fine skin lines and short salt-and-pepper hair",
+    ),
 }
 
 
@@ -987,20 +963,12 @@ def choose_photo_directions(
     rng: Optional[random.Random] = None,
     *,
     target_gender: Literal["women", "men", "unisex"] = "unisex",
-    target_age_group: TargetAgeGroup = "adult-universal",
-    moods: Optional[list[str]] = None,
     garment_type: Optional[GarmentType] = None,
     exclude_labels: Optional[list[str]] = None,
 ) -> list[PhotoDirection]:
     if count < 1:
         raise ValueError("Количество вариантов должно быть больше нуля")
     picker = rng or secrets.SystemRandom()
-
-    effective_age: TargetAgeGroup = target_age_group
-    mood_list = set(moods or [])
-    if mood_list.intersection({"youth", "playful", "bold", "sporty"}) or target_age_group == "18-24":
-        effective_age = "18-24"
-
     pool = [
         item
         for item in _PHOTO_SCENARIOS
@@ -1022,9 +990,8 @@ def choose_photo_directions(
             if target_gender == "unisex"
             else target_gender
         )
-        people_group = _PEOPLE[gender].get(effective_age) or _PEOPLE[gender]["adult-universal"]
-        available_people = [p for p in people_group if p not in used_people]
-        person = picker.choice(available_people or list(people_group))
+        available_people = [p for p in _PEOPLE[gender] if p not in used_people]
+        person = picker.choice(available_people or list(_PEOPLE[gender]))
         used_people.add(person)
         directions.append(
             PhotoDirection(
@@ -1105,20 +1072,22 @@ def build_model_photo_prompt(
 
     if has_separate_print and has_style_reference:
         source_rule = (
-            "Three source images are supplied. Image 1 is the exact product source "
-            "for garment color, wash, cut, construction, print scale and placement. "
-            "Image 2 is the exact isolated print source and must be preserved without "
-            "redrawing. Image 3 is the manually selected photographic reference and "
-            "controls camera distance, crop, pose and background simplicity only."
+            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
+            "for exact garment type, color, wash, cut, fit, construction, print scale "
+            "and placement. Image 2 is EXACT PRINT SOURCE and must be copied without "
+            "redrawing or changing text. Image 3 is STYLE REFERENCE ONLY and controls "
+            "camera distance, crop, pose, lighting direction and background. Discard "
+            "all clothing, colors, logos, text and artwork visible in Image 3."
         )
     elif has_source_detail and has_style_reference:
         source_rule = (
-            "Three source images are supplied. Image 1 is the exact complete product "
-            "source for garment color, cut, construction, print scale and placement. "
-            "Image 2 is a magnified crop from the same product and must be used to "
-            "preserve every visible print detail, letter, outline and color without "
-            "redrawing. Image 3 is the photographic reference and controls only pose, "
-            "camera, crop and background simplicity."
+            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
+            "and the only authority for exact garment type, color, wash, cut, fit, "
+            "construction, print scale and placement. Image 2 is a magnified detail "
+            "from the same product and locks every letter, outline, spacing and color. "
+            "Image 3 is STYLE REFERENCE ONLY and controls pose, camera, crop, lighting "
+            "direction and background. Completely discard Image 3 clothing, color, "
+            "logos, text and artwork."
         )
     elif has_separate_print:
         source_rule = (
@@ -1135,10 +1104,13 @@ def build_model_photo_prompt(
         )
     elif has_style_reference:
         source_rule = (
-            "Two source images are supplied. Image 1 is the exact product source and "
-            "the only source for garment color, wash, cut, construction and artwork. "
-            "Image 2 is the manually selected photographic reference and controls "
-            "camera distance, crop, pose and background simplicity only."
+            "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT: "
+            "it is the only authority for garment type, exact color, wash, cut, fit, "
+            "construction, print pixels, print text, scale and placement. Image 2 is "
+            "STYLE REFERENCE ONLY: use only its camera distance, crop, body orientation, "
+            "pose, lighting direction and background. Completely discard and remove the "
+            "clothing, color, logo, text and artwork visible in Image 2. The final wearer "
+            "must wear the exact product from Image 1, not an edited version of Image 2's garment."
         )
     else:
         source_rule = (
@@ -1153,13 +1125,17 @@ def build_model_photo_prompt(
     reference_setting = str(reference_tags.get("setting", "")).strip()
     if has_style_reference:
         reference_direction = (
-            "MANUALLY SELECTED PHOTO REFERENCE - REQUIRED:\n"
+            "MANUALLY SELECTED PHOTOGRAPHIC REFERENCE - REQUIRED:\n"
+            "- This manually selected photographic reference is mandatory and must control composition.\n"
             "- The final source image is not optional. Closely match its camera "
             "distance, crop, body orientation, pose, lens feel, background density "
             "and overall photographic composition. Do not invent a different street, "
             "studio, room, activity or camera position.\n"
             "- The product image remains the absolute source of truth for the garment. "
-            "Never copy clothing, colors, logos or artwork from the photo reference.\n"
+            "Never copy clothing, colors, logos or artwork from the photo reference. If "
+            "the reference garment contains a foreign print, erase it completely as a "
+            "reference-only detail. No letters, shapes, shadows or ghost traces from that "
+            "foreign print may remain in the final image.\n"
             "- No crowd, no group of pedestrians and no busy public background. Do not "
             "add extra people. Keep the scene visually quiet and product-focused.\n"
             "- For clothing, the wearer must be close enough that the garment and print "

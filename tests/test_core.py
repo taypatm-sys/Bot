@@ -48,6 +48,7 @@ from app.mockup_generator import (
     normalize_detected_mockup,
     prepare_analysis_image,
 )
+from app.handlers import is_user_admin
 from app.reference_catalog import (
     ReferenceCatalog,
     ReferenceCompatibility,
@@ -953,9 +954,9 @@ class ReferenceCatalogTests(unittest.TestCase):
             status = catalog.status_text()
 
             self.assertIsNotNone(processing)
-            self.assertIn("В очереди: 1", status)
-            self.assertIn("Сейчас обрабатывается: 1", status)
-            self.assertIn("Ждут повторной попытки: 1", status)
+            self.assertIn("Очередь загрузки ссылок: 1", status)
+            self.assertIn("Сейчас загружается и анализируется: 1", status)
+            self.assertIn("Повторная загрузка после ошибки: 1", status)
             self.assertIn("временное ограничение Pinterest: 1", status)
 
     def test_resume_now_releases_delayed_and_stale_reference_jobs(self) -> None:
@@ -1011,8 +1012,9 @@ class StorageTests(unittest.TestCase):
     def test_old_database_gets_size_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "posts.sqlite3"
-            with sqlite3.connect(path) as connection:
-                connection.execute(
+            conn1 = sqlite3.connect(path)
+            try:
+                conn1.execute(
                     """
                     CREATE TABLE scheduled_posts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1031,14 +1033,24 @@ class StorageTests(unittest.TestCase):
                     )
                     """
                 )
+            finally:
+                conn1.close()
 
             repository = PostRepository(path)
-            repository.initialize()
-            with sqlite3.connect(path) as connection:
+            try:
+                repository.initialize()
+            finally:
+                repository.close()
+
+            conn2 = sqlite3.connect(path)
+            try:
                 columns = {
                     row[1]
-                    for row in connection.execute("PRAGMA table_info(scheduled_posts)")
+                    for row in conn2.execute("PRAGMA table_info(scheduled_posts)")
                 }
+            finally:
+                conn2.close()
+
             self.assertTrue(
                 {"size", "garment_type", "design_name", "theme_hashtag"}.issubset(
                     columns
@@ -1232,6 +1244,61 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(post.title, "Новое название")
             self.assertEqual(post.price, "290 манат")
             self.assertEqual(post.scheduled_at_utc, new_time)
+
+
+class AdminManagementTests(unittest.TestCase):
+    def test_extra_admin_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            try:
+                repository.initialize()
+                self.assertEqual(repository.list_extra_admin_ids(), [])
+
+                # Add extra admin
+                self.assertTrue(repository.add_extra_admin_id(726543210))
+                self.assertTrue(repository.is_extra_admin_id(726543210))
+                self.assertEqual(repository.list_extra_admin_ids(), [726543210])
+
+                # Adding duplicate returns False
+                self.assertFalse(repository.add_extra_admin_id(726543210))
+
+                # Remove extra admin
+                self.assertTrue(repository.remove_extra_admin_id(726543210))
+                self.assertFalse(repository.is_extra_admin_id(726543210))
+                self.assertEqual(repository.list_extra_admin_ids(), [])
+
+                # Removing non-existent returns False
+                self.assertFalse(repository.remove_extra_admin_id(726543210))
+            finally:
+                repository.close()
+
+    def test_is_user_admin_checks_config_and_repository(self) -> None:
+        config = Config(
+            telegram_bot_token="token",
+            gemini_api_key="key",
+            admin_telegram_id=111,
+            admin_telegram_ids=frozenset({222}),
+            channel_id=-100123,
+            contact_username="user",
+            timezone_name="UTC",
+            gemini_model="model",
+            button_text="btn",
+            copy_language="ru",
+            database_path=Path("posts.sqlite3"),
+            caption_template_path=Path("caption.txt"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = PostRepository(Path(directory) / "posts.sqlite3")
+            try:
+                repository.initialize()
+                repository.add_extra_admin_id(333)
+
+                self.assertTrue(is_user_admin(111, config, repository))
+                self.assertTrue(is_user_admin(222, config, repository))
+                self.assertTrue(is_user_admin(333, config, repository))
+                self.assertFalse(is_user_admin(999, config, repository))
+            finally:
+                repository.close()
 
 
 if __name__ == "__main__":

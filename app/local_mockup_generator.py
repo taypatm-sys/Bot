@@ -50,6 +50,86 @@ class LocalMockupGenerator:
     def available(self) -> bool:
         return True
 
+    async def prepare_simple_reference(
+        self,
+        *,
+        image_bytes: bytes,
+        reference_tags: dict[str, object],
+        preparation: dict[str, object],
+    ) -> GeneratedModelPhoto:
+        return await asyncio.to_thread(
+            self._prepare_simple_reference_sync,
+            image_bytes=image_bytes,
+            reference_tags=reference_tags,
+            preparation=preparation,
+        )
+
+    def _prepare_simple_reference_sync(
+        self,
+        *,
+        image_bytes: bytes,
+        reference_tags: dict[str, object],
+        preparation: dict[str, object],
+    ) -> GeneratedModelPhoto:
+        image = self._decode_rgb(image_bytes)
+        if not bool(preparation.get("suitable", False)):
+            raise LocalCompositeNeedsGemini(
+                str(preparation.get("reason") or "Референс не подходит для простого режима.")
+            )
+
+        target_box = self._read_box(preparation.get("target_print_box"))
+        target_quad = self._read_quad(preparation.get("target_print_quad"))
+        if target_quad is None and target_box is not None:
+            target_quad = self._box_to_quad(target_box)
+        if target_quad is None:
+            raise LocalCompositeNeedsGemini(
+                "Не удалось подготовить точную свободную область футболки."
+            )
+        height, width = image.shape[:2]
+        quad_px = np.array(
+            [[x * width / 100.0, y * height / 100.0] for x, y in target_quad],
+            dtype=np.float32,
+        )
+        if not self._quad_is_valid(quad_px, width, height):
+            raise LocalCompositeNeedsGemini(
+                "Область для простого режима определена ненадежно."
+            )
+
+        existing_present = bool(preparation.get("existing_print_present", False))
+        if existing_present:
+            preflight = {
+                **preparation,
+                "local_composite_safe": True,
+            }
+            cleanup_tags = {
+                **reference_tags,
+                "garment_is_plain": False,
+                "existing_print_coverage_percent": int(
+                    preparation.get("existing_print_coverage_percent", 0) or 0
+                ),
+            }
+            cleanup = self._clean_existing_artwork(
+                image,
+                quad_px,
+                reference_tags=cleanup_tags,
+                preflight=preflight,
+            )
+            if cleanup.confidence < 0.70:
+                raise LocalCompositeNeedsGemini(
+                    "Не удалось заранее очистить футболку без заметных следов."
+                )
+            image = cleanup.image
+
+        output = io.BytesIO()
+        Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).save(
+            output,
+            format="JPEG",
+            quality=92,
+            subsampling=0,
+            optimize=True,
+        )
+        return GeneratedModelPhoto(data=output.getvalue(), mime_type="image/jpeg")
+
     async def generate_variant(
         self,
         *,
@@ -417,7 +497,7 @@ class LocalMockupGenerator:
             # The local fallback may approve only a tiny old print. In that narrow
             # case the new target box is a safe approximation. Larger prints must
             # have their own exact geometry from the vision preflight.
-            if coverage_percent <= 12:
+            if coverage_percent <= 8:
                 cleanup_quad = self._scale_quad(
                     quad,
                     scale_x=1.10,
@@ -452,9 +532,9 @@ class LocalMockupGenerator:
         # OpenCV reconstruction is intentionally limited to small old graphics.
         # A large old print would leave a visible smooth patch outside the new art.
         if (
-            area_ratio > 0.12
-            or coverage_percent > 24
-            or old_to_new_ratio > 1.55
+            area_ratio > 0.08
+            or coverage_percent > 10
+            or old_to_new_ratio > 0.80
         ):
             raise LocalCompositeNeedsGemini(
                 "Чужой принт больше безопасной зоны локального удаления."
