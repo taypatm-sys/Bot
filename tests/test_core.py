@@ -523,7 +523,7 @@ class MockupGeneratorTests(unittest.TestCase):
         self.assertIn("Never invent a rectangular backing", prompt)
         self.assertIn("different fictional non-celebrity adult", prompt)
         self.assertIn("DTF heat-transfer layer", prompt)
-        self.assertIn("normal 24-35 mm equivalent phone lens", prompt)
+        self.assertIn("crisp 35 mm portrait lens", prompt)
         self.assertIn("intended wearer is women", prompt)
 
     def test_direction_library_contains_sitting_and_moving_scenes(self) -> None:

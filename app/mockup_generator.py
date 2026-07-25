@@ -940,20 +940,20 @@ _PHOTO_SCENARIOS = (
 
 _PEOPLE = {
     "women": (
-        "a fictional Central Asian woman in her mid twenties with an ordinary distinctive face, natural skin and dark hair",
-        "a fictional Central Asian woman in her early thirties with a softly angular face, visible skin texture and dark wavy hair",
-        "a fictional woman in her late twenties with a round ordinary face, subtle freckles and a dark bob haircut",
-        "a fictional Central Asian woman in her mid thirties with an expressive everyday face and dark hair tied loosely",
-        "a fictional woman in her early twenties with natural brows, a small facial asymmetry and long dark hair",
-        "a fictional Central Asian woman around forty with a confident ordinary face, fine skin lines and dark hair",
+        "an attractive, stylish Central Asian fashion model in her mid twenties with clean flawless skin, well-groomed dark hair and aesthetic features",
+        "an attractive, elegant Central Asian model in her early thirties with clear radiant skin, stylish dark wavy hair and a confident look",
+        "a stylish, attractive fashion model in her late twenties with clean clear skin, aesthetic features and a dark modern bob haircut",
+        "an attractive Central Asian model in her mid twenties with radiant smooth skin, natural elegance and stylishly arranged dark hair",
+        "an attractive fashion model in her early twenties with clean glowing skin, aesthetic facial structure and long well-groomed dark hair",
+        "a stylish Central Asian fashion model in her late twenties with clean smooth skin, confident expression and aesthetic dark hair",
     ),
     "men": (
-        "a fictional Central Asian man in his mid twenties with an ordinary distinctive face, natural skin and short dark hair",
-        "a fictional man in his early thirties with a softly angular face, dark wavy hair and light stubble",
-        "a fictional Central Asian man in his late twenties with a round ordinary face and dark curly hair",
-        "a fictional man in his mid thirties with visible skin texture, close-cropped dark hair and a short beard",
-        "a fictional Central Asian man in his early twenties with a small facial asymmetry and medium-length dark hair",
-        "a fictional Central Asian man around forty with an everyday face, fine skin lines and short salt-and-pepper hair",
+        "a handsome, attractive Central Asian male fashion model in his mid twenties with clear clean skin, sharp jawline and stylish dark haircut",
+        "a handsome, stylish male model in his late twenties with clean clear skin, attractive facial features, dark wavy hair and light groomed stubble",
+        "a handsome Central Asian male model in his early twenties with smooth clean skin, aesthetic features and stylish dark haircut",
+        "a stylish, handsome male fashion model in his mid twenties with clear smooth skin, attractive jawline and neat dark hair",
+        "a handsome Central Asian male model in his mid twenties with clean clear skin, stylish haircut and athletic aesthetic build",
+        "a handsome, attractive Central Asian male fashion model in his late twenties with clean radiant skin and stylish modern haircut",
     ),
 }
 
@@ -1253,23 +1253,15 @@ def build_model_photo_prompt(
         "REAL PHOTO DIRECTION:\n"
         f"- Wearer: {direction.person}.\n"
         f"{direction_details}"
-        "- The person is genuinely occupied with the action. Do not make them stop, "
-        "square their shoulders or present the product to camera. A hand, bag, cup or "
-        "prop may overlap a small non-printed area naturally, but never hide the print.\n"
-        "- Use believable anatomy, ordinary hands, pores, small skin variations, "
-        "flyaway hairs and true fabric weight. Keep facial character asymmetrical and "
-        "unretouched. No beauty filter, perfect teeth, waxy skin or mannequin posture.\n"
-        "- The person gender must match the intended audience found in the artwork. "
-        "A design dominated by a woman or feminine styling belongs on a woman unless "
-        "the source clearly signals unisex or menswear.\n\n"
-        "PHONE-CAMERA REALISM:\n"
-        "- Use a normal 24-35 mm equivalent phone lens, modest dynamic range, mild "
-        "JPEG texture, restrained sharpening and a little sensor noise in shadows. "
-        "Depending on the specified light, allow slight motion softness, a small "
-        "direct flash or mildly imperfect white balance.\n"
-        "- Keep some ordinary background detail. Avoid fake creamy bokeh, cinematic "
-        "teal-orange grading, perfect symmetry, centered advertising composition, "
-        "flawless studio exposure and hyper-detailed synthetic skin.\n\n"
+        "- The person is genuinely occupied with the action, stylishly presented, attractive and well-groomed. "
+        "A hand, bag, cup or prop may overlap a small non-printed area naturally, but never hide the print.\n"
+        "- The model must have clean flawless skin, handsome/attractive aesthetic facial features, neat well-groomed hair, "
+        "and a stylish streetwear lookbook appearance. No facial blemishes, skin acne, or unnatural distortions.\n"
+        "- The person gender must match the intended audience found in the artwork.\n\n"
+        "EDITORIAL LOOKBOOK REALISM:\n"
+        "- Use a crisp 35 mm portrait lens, natural outdoor daylight, photorealistic skin texture, "
+        "high resolution detail, sharp focus on the garment and print, and authentic subtle fabric folds.\n"
+        "- Keep the scene aesthetically pleasing, stylish, clean, and premium streetwear lookbook quality.\n\n"
         "FORMAT AND SAFE AREA:\n"
         "- Vertical 4:5 image for a Telegram and social-media product post.\n"
         f"{composition}"
