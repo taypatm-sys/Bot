@@ -808,6 +808,15 @@ def build_router(
 ) -> Router:
     router = Router()
 
+    _mod_is_admin_message = is_admin_message
+    _mod_is_admin_callback = is_admin_callback
+
+    async def is_admin_message(message: Message, _config: Config = config) -> bool:
+        return await _mod_is_admin_message(message, config, repository)
+
+    async def is_admin_callback(callback: CallbackQuery, _config: Config = config) -> bool:
+        return await _mod_is_admin_callback(callback, config, repository)
+
     required_draft_fields = {"photo_file_id", "title", "description"}
 
     async def restore_active_draft(
