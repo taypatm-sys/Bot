@@ -78,6 +78,43 @@ class SchemaCompatibilityTests(unittest.TestCase):
         self.assertLessEqual(box.x + box.width, 100)
         self.assertLessEqual(box.y + box.height, 100)
 
+    def test_fallback_compatibility_detailed_reasons(self) -> None:
+        from app.models import ReferenceAsset
+
+        catalog = ReferenceCatalog(
+            repository=SimpleNamespace(),
+            api_key="AIzaSyDummyTestKeyForUnitTestingOnly123",
+            analysis_model="gemini-2.5-flash",
+        )
+        asset = ReferenceAsset(
+            id=42,
+            source_url="http://example.com",
+            resolved_image_url="http://example.com/img.jpg",
+            image_bytes=b"",
+            image_mime_type="image/jpeg",
+            thumbnail_bytes=b"",
+            width=800,
+            height=800,
+            tags={
+                "usable": True,
+                "print_side_visible": "front",
+                "camera_angle": "front",
+                "print_area_visibility": 60,
+            },
+            use_count=0,
+            last_used_at_utc=None,
+            cooldown_until_utc=None,
+            source_name="test",
+        )
+        compat = catalog.fallback_reference_compatibility(
+            asset=asset,
+            garment_type="t-shirt",
+            print_side="back",
+        )
+        self.assertFalse(compat.compatible)
+        self.assertIn("спина", compat.reason)
+        self.assertIn("60%", compat.reason)
+
 
 class FormattingTests(unittest.TestCase):
     def test_numeric_price_gets_currency(self) -> None:

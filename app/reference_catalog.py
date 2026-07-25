@@ -1602,7 +1602,27 @@ class ReferenceCatalog:
         )
 
         if not compatible:
-            reason = "Сохраненные теги показывают неподходящую сторону, ракурс или видимость"
+            fallback_reasons = []
+            if not bool(tags.get("usable", True)):
+                fallback_reasons.append("референс помечен как непригодный в базе")
+            if not side_ok:
+                side_label = "спина" if print_side == "back" else "передняя часть"
+                fallback_reasons.append(
+                    f"по тегам видна сторона '{visible_side}', а требуется {side_label}"
+                )
+            if not angle_ok:
+                fallback_reasons.append(
+                    f"по тегам ракурс '{camera_angle}' не подходит для принта {print_side}"
+                )
+            if visibility < 75:
+                fallback_reasons.append(
+                    f"по тегам видимость зоны принта ({visibility}%) ниже 75%"
+                )
+            reason = (
+                "Резервная проверка тегов: " + "; ".join(fallback_reasons)
+                if fallback_reasons
+                else "Сохраненные теги показывают неподходящую сторону, ракурс или видимость"
+            )
         elif local_safe:
             reason = "Проверено локально по сохраненным тегам и цвету изделия"
         else:
@@ -1894,7 +1914,46 @@ class ReferenceCatalog:
             "local_composite_safe": local_safe,
         }
         if not compatible:
-            updates["reason"] = "Сторона, ракурс или видимость зоны принта не подходят"
+            rejection_reasons = []
+            if not side_ok:
+                side_label = "спина" if print_side == "back" else "передняя часть"
+                actual_side = {
+                    "front": "спереди",
+                    "back": "сзади",
+                    "both": "с обеих сторон",
+                    "cap-front": "спереди (кепка)",
+                }.get(result.visible_side, result.visible_side)
+                rejection_reasons.append(
+                    f"видна сторона '{actual_side}', а требуется {side_label}"
+                )
+            if not angle_ok:
+                angle_label = {
+                    "front": "спереди",
+                    "rear": "со спины",
+                    "three-quarter": "в три четверти",
+                    "side": "сбоку",
+                    "high": "сверху",
+                    "low": "снизу",
+                    "mirror": "в зеркале",
+                }.get(result.camera_angle, result.camera_angle)
+                rejection_reasons.append(
+                    f"ракурс '{angle_label}' не подходит для принта {print_side}"
+                )
+            if result.print_area_visibility < 75:
+                rejection_reasons.append(
+                    f"видимость зоны принта ({result.print_area_visibility}%) ниже 75%"
+                )
+            if not result.compatible:
+                gemini_reason = (result.reason or "").strip()
+                if gemini_reason and gemini_reason != "Сторона, ракурс или видимость зоны принта не подходят":
+                    rejection_reasons.append(f"оценка Gemini: {gemini_reason}")
+                else:
+                    rejection_reasons.append("поза или кадрирование на фото не подходят для нанесения")
+            updates["reason"] = (
+                "Не подходит: " + "; ".join(rejection_reasons)
+                if rejection_reasons
+                else "Сторона, ракурс или видимость зоны принта не подходят"
+            )
         elif result.local_composite_safe and not local_safe:
             updates["reason"] = "Референс подходит для Gemini, но не для локальной замены"
         return result.model_copy(update=updates)

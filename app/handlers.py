@@ -972,6 +972,10 @@ def build_router(
                     print_height_percent=spec.print_height_percent,
                     print_top_offset_percent=spec.print_top_offset_percent,
                 )
+                if not compatibility.compatible:
+                    compatibility = compatibility.model_copy(
+                        update={"reason": f"Gemini API недоступен ({error}); {compatibility.reason}"}
+                    )
             if not compatibility.compatible:
                 excluded_ids.append(candidate.id)
                 reject_reasons.append(f"#{candidate.id}: {compatibility.reason}")
