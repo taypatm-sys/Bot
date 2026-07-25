@@ -3845,20 +3845,52 @@ def build_router(
             await preview_and_confirm_reference(callback, state)
 
     @router.message()
-    async def fallback(message: Message, state: FSMContext) -> None:
+    async def fallback(message: Message, state: FSMContext, bot: Bot) -> None:
         if not await is_admin_message(message, config, repository):
             return
         current_state_name = await state.get_state() or ""
         user_text = message.text.strip() if message.text else ""
+
+        data = await state.get_data()
+        active_draft = repository.get_active_draft(message.chat.id) or {}
+        photo_file_id = (
+            data.get("photo_file_id")
+            or data.get("model_source_file_id")
+            or active_draft.get("photo_file_id")
+        )
 
         if user_text:
             intent_res = await ai_assistant.analyze_message(
                 chat_id=message.chat.id,
                 user_text=user_text,
                 current_state=current_state_name,
+                active_draft=active_draft,
             )
 
-            if intent_res.intent == "search_references":
+            if intent_res.intent == "switch_to_model":
+                if photo_file_id:
+                    await message.answer(
+                        "💡 Понял вас! Берем загруженное фото товара и переключаем на создание фото на модели..."
+                    )
+                    await accept_model_mockup(
+                        message=message,
+                        state=state,
+                        bot=bot,
+                        file_id=photo_file_id,
+                        mime_type="image/jpeg",
+                    )
+                    return
+                else:
+                    await state.clear()
+                    repository.clear_active_draft(message.chat.id)
+                    repository.clear_model_draft(message.chat.id)
+                    await state.set_state(DraftStates.waiting_model_mockup)
+                    await message.answer(
+                        "Отправьте фотографию вещи с размещенным принтом, и я сразу создам для нее фото на модели."
+                    )
+                    return
+
+            elif intent_res.intent == "search_references":
                 await message.answer(
                     intent_res.response_text,
                     reply_markup=references_keyboard(),
@@ -3867,9 +3899,15 @@ def build_router(
             elif intent_res.intent == "show_queue":
                 posts = repository.list_pending()
                 if not posts:
-                    await message.answer("Очередь запланированных постов пока пуста.", reply_markup=main_keyboard())
+                    await message.answer(
+                        "Очередь запланированных постов пока пуста.",
+                        reply_markup=main_keyboard(),
+                    )
                 else:
-                    await message.answer(f"Запланировано постов в очереди: {len(posts)}", reply_markup=main_keyboard())
+                    await message.answer(
+                        f"Запланировано постов в очереди: {len(posts)}",
+                        reply_markup=main_keyboard(),
+                    )
                 return
             elif intent_res.intent == "show_settings":
                 await message.answer(

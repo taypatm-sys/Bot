@@ -24,13 +24,14 @@ SYSTEM_PROMPT = """Ты — интеллектуальный ассистент 
 Твоя задача — извлечь намерение (intent) и параметры из текста пользователя и сформулировать естественный ответ.
 
 Возможные значения intent:
+- "switch_to_model": пользователь просит сделать этот макет/фото на модели, перенести макет на модель ("нужно сначала сделать этот макет на модели", "сделай на модели", "на модели", "покажи на модели")
 - "search_references": пользователь просит найти/подгрузить новые референсы (параметры: garment_type ("t-shirt", "hoodie", "cap", "jacket", и т.д.))
 - "create_post": пользователь хочет создать пост или отправить макет
 - "show_queue": запрос очереди постов
 - "show_settings": открыть настройки или список администраторов
 - "show_status": запрос статуса каталога референсов или бота
-- "change_price": просит изменить цену (параметры: price)
-- "change_size": просит изменить размер (параметры: size)
+- "set_price": просит изменить/указать цену (параметры: price)
+- "set_size": просит изменить/указать размер (параметры: size)
 - "ask_clarification": запрос слишком неясен или содержит неоднозначности, нужно задать уточняющий вопрос
 - "general_chat": вежливое общение, вопрос о возможностях или ответы на приветствие
 
@@ -66,12 +67,21 @@ class AIAssistant:
         chat_id: int,
         user_text: str,
         current_state: str = "",
+        active_draft: Optional[dict] = None,
     ) -> IntentResult:
         if not user_text.strip():
             return IntentResult(
                 intent="general_chat",
                 parameters={},
                 response_text="Отправьте фотографию вещи или выберите действие в меню.",
+            )
+
+        lowered = user_text.casefold()
+        if any(phrase in lowered for phrase in ("на модели", "сделай на модели", "сделать этот макет на модели", "перенести на модель", "покажи на модели", "макет на модели")):
+            return IntentResult(
+                intent="switch_to_model",
+                parameters={},
+                response_text="💡 Переключаю загруженное фото на создание макета на модели...",
             )
 
         history = self.repository.get_chat_history(chat_id)
