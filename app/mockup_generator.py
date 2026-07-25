@@ -1088,7 +1088,10 @@ def build_model_photo_prompt(
                 f"center at {spec.print_center_x_percent}% of the panel width. "
                 f"Construction: {spec.construction_details}. The intended wearer "
                 f"is {spec.target_gender}, target age group {spec.target_age_group}. "
-                f"The artwork mood tags are {', '.join(spec.moods)}."
+                f"The artwork mood tags are {', '.join(spec.moods)}. "
+                "CRITICAL PRINT SCALE CONTRACT: The new print scale and proportions MUST MATCH Image 1 (Source Mockup) EXACTLY. "
+                "COMPLETELY IGNORE the print size visible on Image 3 (Reference Photo). "
+                "If Image 1 has a large print covering most of the back/chest, the new print MUST be equally large on the model."
             )
 
     if has_separate_print and has_style_reference:

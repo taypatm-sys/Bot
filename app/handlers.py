@@ -223,14 +223,31 @@ def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
     )
 
 
-def model_analysis_keyboard(*, has_print: bool) -> InlineKeyboardMarkup:
+def model_analysis_keyboard(*, has_print: bool, current_gender: str = "unisex") -> InlineKeyboardMarkup:
     print_label = (
         "Заменить дополнительный PNG"
         if has_print
         else "Добавить PNG принта - необязательно"
     )
+    men_mark = "✓ " if current_gender == "men" else ""
+    women_mark = "✓ " if current_gender == "women" else ""
+    unisex_mark = "✓ " if current_gender == "unisex" else ""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{men_mark}👨 Мужская",
+                    callback_data="model:set_gender:men",
+                ),
+                InlineKeyboardButton(
+                    text=f"{women_mark}👩 Женская",
+                    callback_data="model:set_gender:women",
+                ),
+                InlineKeyboardButton(
+                    text=f"{unisex_mark}👫 Унисекс",
+                    callback_data="model:set_gender:unisex",
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="Простой - бесплатно",
@@ -2788,7 +2805,10 @@ def build_router(
         )
         await status_message.edit_text(
             format_model_analysis(spec),
-            reply_markup=model_analysis_keyboard(has_print=False),
+            reply_markup=model_analysis_keyboard(
+                has_print=False,
+                current_gender=spec.target_gender,
+            ),
         )
 
     @router.message(DraftStates.waiting_model_mockup, F.photo)
@@ -2908,7 +2928,57 @@ def build_router(
         await callback.answer()
         await callback.message.answer(
             format_model_analysis(spec, print_asset),
-            reply_markup=model_analysis_keyboard(has_print=bool(print_asset)),
+            reply_markup=model_analysis_keyboard(
+                has_print=bool(print_asset),
+                current_gender=spec.target_gender,
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("model:set_gender:"))
+    async def set_model_gender_handler(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config, repository):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        new_gender = callback.data.split(":")[-1]
+        if new_gender not in {"men", "women", "unisex"}:
+            await callback.answer()
+            return
+
+        data = await restore_model_draft(state, callback.message.chat.id)
+        raw_spec = data.get("model_mockup_spec")
+        if not raw_spec:
+            await callback.answer("Анализ макета не найден", show_alert=True)
+            return
+
+        spec = validated_mockup_spec(raw_spec)
+        updated_spec = spec.model_copy(update={"target_gender": new_gender})
+
+        raw_print_asset = data.get("model_print_asset_spec")
+        print_asset = PrintAssetSpec.model_validate(raw_print_asset) if raw_print_asset else None
+
+        await state.update_data(
+            model_mockup_spec=updated_spec.model_dump(),
+            model_preview_reference_id=None,
+            model_preview_compatibility=None,
+        )
+        await save_model_draft(state, callback.message.chat.id)
+
+        gender_names = {"men": "Мужская модель", "women": "Женская модель", "unisex": "Унисекс"}
+        await callback.answer(f"Выбран пол: {gender_names.get(new_gender, new_gender)}")
+
+        has_print = bool(data.get("model_print_file_id") or print_asset)
+        analysis_text = format_model_analysis(updated_spec, print_asset)
+        await callback.message.edit_text(
+            analysis_text,
+            reply_markup=model_analysis_keyboard(
+                has_print=has_print,
+                current_gender=new_gender,
+            ),
         )
 
     @router.callback_query(F.data == "model:print")
@@ -3047,7 +3117,10 @@ def build_router(
             )
         await waiting.edit_text(
             format_model_analysis(spec, print_asset) + warning,
-            reply_markup=model_analysis_keyboard(has_print=True),
+            reply_markup=model_analysis_keyboard(
+                has_print=True,
+                current_gender=spec.target_gender,
+            ),
         )
 
     @router.callback_query(
