@@ -487,6 +487,27 @@ def prepare_analysis_image(image_bytes: bytes) -> PreparedAnalysisImage:
     )
 
 
+def _prepare_lightweight_analysis_bytes(image_bytes: bytes, max_dimension: int = 1200) -> tuple[bytes, str]:
+    """Convert and downsample large image bytes to a lightweight JPEG for Gemini API analysis."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if max(image.size) > max_dimension:
+                image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            if "A" in image.getbands():
+                rgba = image.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                image = Image.alpha_composite(background, rgba).convert("RGB")
+            else:
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=88, optimize=True)
+            return output.getvalue(), "image/jpeg"
+    except Exception:
+        return image_bytes, "image/png"
+
+
 def prepare_source_print_detail(
     image_bytes: bytes,
     spec: Optional[MockupSpec],
@@ -1515,6 +1536,7 @@ class MockupGenerator:
         image_bytes: bytes,
         mime_type: str,
     ) -> _DetectedPrint:
+        analysis_bytes, analysis_mime = _prepare_lightweight_analysis_bytes(image_bytes)
         prompt = (
             "Analyze only this isolated DTF print artwork. Transparent pixels are empty "
             "space and are not a rectangular background. Preserve wording exactly but "
@@ -1530,7 +1552,7 @@ class MockupGenerator:
             model=self.analysis_model,
             contents=[
                 prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                types.Part.from_bytes(data=analysis_bytes, mime_type=analysis_mime),
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
