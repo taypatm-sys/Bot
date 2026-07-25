@@ -1052,7 +1052,8 @@ def build_router(
                 f"Почему выбран: {reasons[:700]}\n\n"
                 f"Сторона: {side_label}\n"
                 f"Цвет товара: {spec.shirt_color}\n"
-                "Платная генерация еще не запускалась."
+                "Платная генерация еще не запускалась.\n"
+                "👇 Выберите режим ниже для запуска:"
             ),
             reply_markup=gemini_preview_keyboard(),
         )
@@ -1405,26 +1406,29 @@ def build_router(
                     )
 
                 if not compatibility.compatible:
-                    excluded_reference_ids.append(candidate.id)
-                    reference_replacements += 1
-                    repository.set_setting(
-                        "last_mockup_reference_replacements",
-                        str(reference_replacements),
-                    )
-                    preflight_reasons.append(
-                        f"#{candidate.id}: {compatibility.reason}"
-                    )
-                    repository.release_reference_reservation(
-                        candidate.id,
-                        candidate_token,
-                        outcome="rejected_preflight",
-                    )
-                    logger.info(
-                        "Референс #%s отклонен до генерации: %s",
-                        candidate.id,
-                        compatibility.reason,
-                    )
-                    continue
+                    if use_confirmed:
+                        compatibility = compatibility.model_copy(update={"compatible": True})
+                    else:
+                        excluded_reference_ids.append(candidate.id)
+                        reference_replacements += 1
+                        repository.set_setting(
+                            "last_mockup_reference_replacements",
+                            str(reference_replacements),
+                        )
+                        preflight_reasons.append(
+                            f"#{candidate.id}: {compatibility.reason}"
+                        )
+                        repository.release_reference_reservation(
+                            candidate.id,
+                            candidate_token,
+                            outcome="rejected_preflight",
+                        )
+                        logger.info(
+                            "Референс #%s отклонен до генерации: %s",
+                            candidate.id,
+                            compatibility.reason,
+                        )
+                        continue
 
                 if (
                     requested_generation_mode == "local"
@@ -3089,15 +3093,40 @@ def build_router(
                 "генерации. Если качество не пройдет проверку, Gemini не запустится."
             )
         elif callback.data == "model:generate:gemini":
-            await state.update_data(model_generation_mode="gemini")
-            await save_model_draft(state, callback.message.chat.id)
-            await callback.answer("Подбираю референс")
-            await prepare_gemini_preview(
-                message=callback.message,
-                state=state,
-                replace_current=False,
-            )
-            return
+            preview_ref_id = data.get("model_preview_reference_id")
+            if preview_ref_id:
+                await state.update_data(
+                    model_generation_mode="gemini",
+                    model_confirmed_reference_id=preview_ref_id,
+                    model_confirmed_usage_token=data.get("model_preview_usage_token"),
+                    model_confirmed_direction=data.get("model_preview_direction"),
+                )
+                await save_model_draft(state, callback.message.chat.id)
+                await callback.answer("Запускаю Gemini")
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                status_message = await callback.message.answer(
+                    "Параметры и референс подтверждены. Запускаю платную генерацию через Gemini."
+                )
+                await generate_model_batch(
+                    message=callback.message,
+                    state=state,
+                    bot=bot,
+                    status_message=status_message,
+                )
+                return
+            else:
+                await state.update_data(model_generation_mode="gemini")
+                await save_model_draft(state, callback.message.chat.id)
+                await callback.answer("Подбираю референс")
+                await prepare_gemini_preview(
+                    message=callback.message,
+                    state=state,
+                    replace_current=False,
+                )
+                return
         else:
             generation_mode = "auto"
             answer_text = "Запускаю создание фото"
