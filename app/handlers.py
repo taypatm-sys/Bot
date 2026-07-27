@@ -44,6 +44,7 @@ from app.mockup_generator import (
     choose_photo_directions,
     ensure_mockup_spec_ready,
 )
+from app.openai_mockup_generator import OpenAIMockupGenerator
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
 from app.scheduling import (
@@ -253,9 +254,15 @@ def model_analysis_keyboard(*, has_print: bool, current_gender: str = "unisex") 
                     text="Простой - бесплатно",
                     callback_data="model:generate:local",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
-                    text="Сложный - Gemini",
+                    text="Gemini",
                     callback_data="model:generate:gemini",
+                ),
+                InlineKeyboardButton(
+                    text="OpenAI",
+                    callback_data="model:generate:openai",
                 ),
             ],
             [
@@ -509,14 +516,22 @@ def reference_card_keyboard(reference_id: int, offset: int, total: int) -> Inlin
     )
 
 
-def gemini_preview_keyboard() -> InlineKeyboardMarkup:
+def paid_preview_keyboard(provider: str) -> InlineKeyboardMarkup:
+    provider = "openai" if provider == "openai" else "gemini"
+    label = "OpenAI" if provider == "openai" else "Gemini"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Запустить Gemini", callback_data="model:gemini-confirm"),
+                InlineKeyboardButton(
+                    text=f"Запустить {label}",
+                    callback_data=f"model:paid-confirm:{provider}",
+                ),
             ],
             [
-                InlineKeyboardButton(text="Другой референс", callback_data="model:gemini-other"),
+                InlineKeyboardButton(
+                    text="Другой референс",
+                    callback_data=f"model:paid-other:{provider}",
+                ),
                 InlineKeyboardButton(text="Отмена", callback_data="model:cancel"),
             ],
         ]
@@ -850,6 +865,7 @@ def build_router(
     copywriter: ImageCopywriter,
     mockup_generator: MockupGenerator,
     local_generator: LocalMockupGenerator,
+    openai_generator: OpenAIMockupGenerator,
     reference_catalog: ReferenceCatalog,
     publisher: Publisher,
     template_store: CaptionTemplateStore,
@@ -895,12 +911,15 @@ def build_router(
         if data.get("model_source_file_id"):
             repository.save_model_draft(chat_id, data)
 
-    async def prepare_gemini_preview(
+    async def prepare_paid_preview(
         *,
         message: Message,
         state: FSMContext,
+        provider: str,
         replace_current: bool = False,
     ) -> bool:
+        provider = "openai" if provider == "openai" else "gemini"
+        provider_label = "OpenAI" if provider == "openai" else "Gemini"
         if await state.get_state() == DraftStates.generating_model_photos.state:
             return False
         data = await restore_model_draft(state, message.chat.id)
@@ -942,7 +961,7 @@ def build_router(
             )[0]
 
         waiting = await message.answer(
-            "Подбираю референс и проверяю его до платной генерации..."
+            f"Подбираю референс и проверяю его до генерации через {provider_label}..."
         )
         selected = None
         selected_compatibility = None
@@ -983,7 +1002,7 @@ def build_router(
                 )
             except Exception as error:
                 logger.warning(
-                    "Gemini preview preflight для референса #%s недоступен: %s",
+                    "Проверка референса для платного режима #%s недоступна: %s",
                     candidate.id,
                     error,
                 )
@@ -998,7 +1017,7 @@ def build_router(
                 )
                 if not compatibility.compatible:
                     compatibility = compatibility.model_copy(
-                        update={"reason": f"Gemini API недоступен ({error}); {compatibility.reason}"}
+                        update={"reason": f"Vision-проверка недоступна ({error}); {compatibility.reason}"}
                     )
             if not compatibility.compatible:
                 excluded_ids.append(candidate.id)
@@ -1052,7 +1071,8 @@ def build_router(
         score = selected.last_match_score
         reasons = selected.last_match_reason or selected_compatibility.reason
         await state.update_data(
-            model_generation_mode="gemini",
+            model_generation_mode=provider,
+            model_preview_provider=provider,
             model_preview_reference_id=selected.id,
             model_preview_usage_token=selected_token,
             model_preview_direction=asdict(direction),
@@ -1069,7 +1089,7 @@ def build_router(
                 filename=f"reference-{selected.id}.jpg",
             ),
             caption=(
-                f"Референс #{selected.id} выбран для Gemini\n\n"
+                f"Референс #{selected.id} выбран для {provider_label}\n\n"
                 f"Совместимость: {score}/100\n"
                 f"Почему выбран: {reasons[:700]}\n\n"
                 f"Сторона: {side_label}\n"
@@ -1077,7 +1097,7 @@ def build_router(
                 "Платная генерация еще не запускалась.\n"
                 "👇 Выберите режим ниже для запуска:"
             ),
-            reply_markup=gemini_preview_keyboard(),
+            reply_markup=paid_preview_keyboard(provider),
         )
         return True
 
@@ -1535,7 +1555,15 @@ def build_router(
                     provider="gemini",
                     model=config.gemini_image_model,
                     score=10,
-                    reasons=("пользователь выбрал сложный режим",),
+                    reasons=("пользователь выбрал Gemini",),
+                )
+            elif requested_generation_mode == "openai":
+                generation_decision = GenerationDecision(
+                    tier="very_complex",
+                    provider="openai",
+                    model=config.openai_image_model,
+                    score=10,
+                    reasons=("пользователь выбрал OpenAI",),
                 )
             else:
                 generation_decision = choose_generation_model(
@@ -1660,6 +1688,11 @@ def build_router(
                             **generator_kwargs,
                             image_model=generation_decision.model,
                         )
+                elif generation_decision.provider == "openai":
+                    generated_photo = await openai_generator.generate_variant(
+                        **generator_kwargs,
+                        image_model=generation_decision.model,
+                    )
                 else:
                     generated_photo = await mockup_generator.generate_variant(
                         **generator_kwargs,
@@ -1810,8 +1843,11 @@ def build_router(
                 f"Администраторов: {len(config.admin_ids)}\n"
                 "Обычные задачи: локально, без оплаты\n"
                 "Сложные задачи: локальная попытка с проверкой\n"
-                f"Очень сложные: {config.gemini_image_model}\n"
-                f"Формат: {config.gemini_image_size}, 4:5\n"
+                f"Gemini: {config.gemini_image_model}\n"
+                f"OpenAI: {'настроен' if config.openai_api_key else 'ключ не добавлен'}"
+                f" ({config.openai_image_model})\n"
+                f"Формат Gemini: {config.gemini_image_size}, 4:5\n"
+                f"Формат OpenAI: {config.openai_image_size}, качество {config.openai_image_quality}\n"
                 "Режим: обязательный проверенный референс\n"
                 f"Референсов готово: {ready_references}\n"
                 f"В последней генерации: {last_reference_count}\n"
@@ -3170,23 +3206,32 @@ def build_router(
                 "Параметры подтверждены. Запускаю локальную обработку без платной "
                 "генерации. Если качество не пройдет проверку, Gemini не запустится."
             )
-        elif callback.data == "model:generate:gemini":
+        elif callback.data in {"model:generate:gemini", "model:generate:openai"}:
+            provider = "openai" if callback.data.endswith(":openai") else "gemini"
+            provider_label = "OpenAI" if provider == "openai" else "Gemini"
+            if provider == "openai" and not config.openai_api_key:
+                await callback.answer(
+                    "OPENAI_API_KEY не добавлен в Render",
+                    show_alert=True,
+                )
+                return
             preview_ref_id = data.get("model_preview_reference_id")
-            if preview_ref_id:
+            preview_provider = data.get("model_preview_provider")
+            if preview_ref_id and preview_provider == provider:
                 await state.update_data(
-                    model_generation_mode="gemini",
+                    model_generation_mode=provider,
                     model_confirmed_reference_id=preview_ref_id,
                     model_confirmed_usage_token=data.get("model_preview_usage_token"),
                     model_confirmed_direction=data.get("model_preview_direction"),
                 )
                 await save_model_draft(state, callback.message.chat.id)
-                await callback.answer("Запускаю Gemini")
+                await callback.answer(f"Запускаю {provider_label}")
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     pass
                 status_message = await callback.message.answer(
-                    "Параметры и референс подтверждены. Запускаю платную генерацию через Gemini."
+                    f"Параметры и референс подтверждены. Запускаю генерацию через {provider_label}."
                 )
                 await generate_model_batch(
                     message=callback.message,
@@ -3195,16 +3240,16 @@ def build_router(
                     status_message=status_message,
                 )
                 return
-            else:
-                await state.update_data(model_generation_mode="gemini")
-                await save_model_draft(state, callback.message.chat.id)
-                await callback.answer("Подбираю референс")
-                await prepare_gemini_preview(
-                    message=callback.message,
-                    state=state,
-                    replace_current=False,
-                )
-                return
+            await state.update_data(model_generation_mode=provider)
+            await save_model_draft(state, callback.message.chat.id)
+            await callback.answer("Подбираю референс")
+            await prepare_paid_preview(
+                message=callback.message,
+                state=state,
+                provider=provider,
+                replace_current=False,
+            )
+            return
         else:
             generation_mode = "auto"
             answer_text = "Запускаю создание фото"
@@ -3221,8 +3266,8 @@ def build_router(
             status_message=status_message,
         )
 
-    @router.callback_query(F.data == "model:gemini-confirm")
-    async def confirm_gemini_preview(
+    @router.callback_query(F.data.startswith("model:paid-confirm:"))
+    async def confirm_paid_preview(
         callback: CallbackQuery,
         state: FSMContext,
         bot: Bot,
@@ -3232,21 +3277,28 @@ def build_router(
         if not callback.message:
             await callback.answer()
             return
+        provider = callback.data.rsplit(":", 1)[-1]
+        provider = "openai" if provider == "openai" else "gemini"
+        provider_label = "OpenAI" if provider == "openai" else "Gemini"
+        if provider == "openai" and not config.openai_api_key:
+            await callback.answer("OPENAI_API_KEY не настроен", show_alert=True)
+            return
         data = await restore_model_draft(state, callback.message.chat.id)
         if not data.get("model_preview_reference_id"):
             await callback.answer("Референс предпросмотра не найден", show_alert=True)
             return
         await state.update_data(
-            model_generation_mode="gemini",
+            model_generation_mode=provider,
+            model_preview_provider=provider,
             model_confirmed_reference_id=data.get("model_preview_reference_id"),
             model_confirmed_usage_token=data.get("model_preview_usage_token"),
             model_confirmed_direction=data.get("model_preview_direction"),
         )
         await save_model_draft(state, callback.message.chat.id)
-        await callback.answer("Запускаю Gemini")
+        await callback.answer(f"Запускаю {provider_label}")
         await callback.message.edit_reply_markup(reply_markup=None)
         status_message = await callback.message.answer(
-            "Референс подтвержден. Запускаю платную генерацию через Gemini."
+            f"Референс подтвержден. Запускаю генерацию через {provider_label}."
         )
         await generate_model_batch(
             message=callback.message,
@@ -3255,8 +3307,8 @@ def build_router(
             status_message=status_message,
         )
 
-    @router.callback_query(F.data == "model:gemini-other")
-    async def choose_other_gemini_reference(
+    @router.callback_query(F.data.startswith("model:paid-other:"))
+    async def choose_other_paid_reference(
         callback: CallbackQuery,
         state: FSMContext,
     ) -> None:
@@ -3267,9 +3319,11 @@ def build_router(
             return
         await callback.answer("Ищу другой референс")
         await callback.message.edit_reply_markup(reply_markup=None)
-        await prepare_gemini_preview(
+        provider = callback.data.rsplit(":", 1)[-1]
+        await prepare_paid_preview(
             message=callback.message,
             state=state,
+            provider=provider,
             replace_current=True,
         )
 
@@ -3374,11 +3428,13 @@ def build_router(
         if await state.get_state() == DraftStates.generating_model_photos.state:
             await callback.answer("Фотографии уже создаются", show_alert=True)
             return
-        if data.get("model_generation_mode") == "gemini":
+        if data.get("model_generation_mode") in {"gemini", "openai"}:
+            provider = data.get("model_generation_mode", "gemini")
             await callback.answer("Подбираю новый референс")
-            await prepare_gemini_preview(
+            await prepare_paid_preview(
                 message=callback.message,
                 state=state,
+                provider=provider,
                 replace_current=False,
             )
             return

@@ -18,6 +18,9 @@ ChatId = Union[int, str]
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 DEFAULT_GEMINI_IMAGE_SIZE = "1K"
+DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-1.5"
+DEFAULT_OPENAI_IMAGE_SIZE = "1024x1536"
+DEFAULT_OPENAI_IMAGE_QUALITY = "medium"
 DEFAULT_MOCKUP_VARIANTS = 1
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
@@ -133,6 +136,7 @@ def _load_timezone(name: str) -> tzinfo:
 class Config:
     telegram_bot_token: str
     gemini_api_key: str
+    openai_api_key: str
     admin_telegram_id: int
     channel_id: ChatId
     contact_username: str
@@ -145,6 +149,9 @@ class Config:
     database_url: str = ""
     admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
+    openai_image_model: str = DEFAULT_OPENAI_IMAGE_MODEL
+    openai_image_size: str = DEFAULT_OPENAI_IMAGE_SIZE
+    openai_image_quality: str = DEFAULT_OPENAI_IMAGE_QUALITY
     gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
     mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
     reference_sources_path: Path = BUNDLED_REFERENCE_SOURCES
@@ -186,6 +193,7 @@ class Config:
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
             gemini_api_key=_required("GEMINI_API_KEY"),
+            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             admin_telegram_id=int(admin_value),
             channel_id=_parse_channel_id(_required("CHANNEL_ID")),
             contact_username=contact_username,
@@ -207,6 +215,18 @@ class Config:
             ),
             gemini_image_size=normalize_gemini_image_size(
                 os.getenv("GEMINI_IMAGE_SIZE", DEFAULT_GEMINI_IMAGE_SIZE)
+            ),
+            openai_image_model=(
+                os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_OPENAI_IMAGE_MODEL).strip()
+                or DEFAULT_OPENAI_IMAGE_MODEL
+            ),
+            openai_image_size=(
+                os.getenv("OPENAI_IMAGE_SIZE", DEFAULT_OPENAI_IMAGE_SIZE).strip()
+                or DEFAULT_OPENAI_IMAGE_SIZE
+            ),
+            openai_image_quality=(
+                os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_OPENAI_IMAGE_QUALITY).strip()
+                or DEFAULT_OPENAI_IMAGE_QUALITY
             ),
             mockup_variants=_mockup_variants(
                 os.getenv("MOCKUP_VARIANTS", str(DEFAULT_MOCKUP_VARIANTS))

@@ -3,7 +3,7 @@ from typing import Literal, Protocol
 
 
 GenerationTier = Literal["routine", "complex", "very_complex"]
-GenerationProvider = Literal["local", "gemini"]
+GenerationProvider = Literal["local", "gemini", "openai"]
 
 
 class MockupSpecLike(Protocol):
@@ -37,6 +37,7 @@ class GenerationDecision:
         return {
             "local": "локальный режим",
             "gemini": "Gemini",
+            "openai": "OpenAI",
         }[self.provider]
 
 
