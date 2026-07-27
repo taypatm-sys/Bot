@@ -1325,7 +1325,8 @@ class ReferenceCatalog:
         excluded = set(exclude_ids).union(rejected_user_ids)
         mood_set = set(moods)
         scored: list[tuple[float, ReferenceAsset, list[str]]] = []
-        for asset in self.repository.list_ready_reference_assets():
+        ready_assets = self.repository.list_ready_reference_assets()
+        for asset in ready_assets:
             if asset.id in excluded:
                 continue
             if simple_only and not asset.simple_ready:
@@ -1397,6 +1398,38 @@ class ReferenceCatalog:
             if preferred_source_name and asset.source_name == preferred_source_name:
                 score = min(100, score + 8)
             scored.append((float(score), asset, score_reasons))
+
+        if not scored:
+            # Fallback pass: relax strict gender tag to avoid failing generation when ready assets exist
+            for asset in ready_assets:
+                if asset.id in excluded:
+                    continue
+                if simple_only and not asset.simple_ready:
+                    continue
+                tags = asset.tags
+                garments = set(tags.get("garment_types", []))
+                if garment_type not in garments:
+                    continue
+                visibility = int(tags.get("print_area_visibility", 0) or 0)
+                if visibility < 45:
+                    continue
+                visible_side = str(tags.get("print_side_visible", "unclear"))
+                if print_side == "back" and visible_side not in {"back", "both"}:
+                    continue
+                if print_side == "front" and visible_side not in {"front", "both"}:
+                    continue
+                score, score_reasons = self.score_reference(
+                    asset=asset,
+                    garment_type=garment_type,
+                    target_gender=target_gender,
+                    moods=moods,
+                    print_side=print_side,
+                    shirt_color=shirt_color,
+                    fit=fit,
+                    season=season,
+                )
+                scored.append((float(score), asset, score_reasons))
+
         if not scored:
             return None
         scored.sort(key=lambda item: (-item[0], item[1].use_count, item[1].id))
