@@ -140,9 +140,14 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
 
 
 class PostRepository:
-    """Queue storage with PostgreSQL support and an automatic local SQLite fallback."""
+    """Queue storage with PostgreSQL support and an optional SQLite fallback."""
 
-    def __init__(self, source: DatabaseSource):
+    def __init__(
+        self,
+        source: DatabaseSource,
+        *,
+        allow_sqlite_fallback: bool = False,
+    ):
         source_text = str(source)
         self.database_url = (
             source_text if source_text.startswith(POSTGRES_PREFIXES) else ""
@@ -150,6 +155,7 @@ class PostRepository:
         self.path = None if self.database_url else Path(source)
         self._pool: Any = None
         self._was_fallback: bool = False
+        self.allow_sqlite_fallback = bool(allow_sqlite_fallback)
 
     @property
     def backend_name(self) -> str:
@@ -164,9 +170,15 @@ class PostRepository:
     def _fallback_to_sqlite(self, reason: str) -> None:
         import logging
 
+        if not self.allow_sqlite_fallback:
+            raise RuntimeError(
+                "PostgreSQL недоступен. Автоматический переход на SQLite отключен, "
+                "чтобы Railway не потерял данные на временном диске. "
+                f"Причина: {reason}"
+            )
         logging.getLogger(__name__).warning(
-            "⚠️ ВНИМАНИЕ: Ошибка подключения к PostgreSQL (%s). "
-            "Переключаюсь на локальную базу SQLite для бесперебойной работы!",
+            "⚠️ Ошибка подключения к PostgreSQL (%s). "
+            "Разрешен переход на локальную SQLite.",
             reason,
         )
         if self._pool is not None:
@@ -221,6 +233,8 @@ class PostRepository:
                         yield connection
                     return
             except Exception as error:
+                if not self.allow_sqlite_fallback:
+                    raise
                 self._fallback_to_sqlite(str(error))
 
         if self.path is None:
@@ -246,10 +260,7 @@ class PostRepository:
 
     def initialize(self) -> None:
         if self.database_url:
-            try:
-                self._ensure_pool()
-            except Exception as error:
-                self._fallback_to_sqlite(str(error))
+            self._ensure_pool()
 
         id_column = (
             "BIGSERIAL PRIMARY KEY"

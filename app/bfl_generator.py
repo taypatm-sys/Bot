@@ -58,7 +58,7 @@ class BflMockupGenerator:
     ) -> GeneratedModelPhoto:
         if not self.available:
             raise MockupGenerationError(
-                "Экономная модель не подключена. Добавьте BFL_API_KEY в Render."
+                "Экономная модель не подключена. Добавьте BFL_API_KEY в переменных сервера."
             )
         if not reference_image_bytes:
             raise MockupGenerationError(
