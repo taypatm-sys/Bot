@@ -85,7 +85,6 @@ class DraftStates(StatesGroup):
     waiting_queue_price = State()
     waiting_queue_time = State()
     waiting_add_admin_id = State()
-    confirming_reference = State()
     preview = State()
 
 
@@ -120,6 +119,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="Создать пост"),
+                KeyboardButton(text="Фото на модели"),
             ],
             [
                 KeyboardButton(text="Очередь"),
@@ -391,54 +391,57 @@ def format_model_analysis(
 ) -> str:
     mood_text = ", ".join(_MOOD_LABELS.get(item, item) for item in spec.moods)
     side = "спереди" if spec.side == "front" else "сзади"
-    png_text = "не добавлен - не требуется"
+    gender_label = _GENDER_LABELS.get(spec.target_gender, spec.target_gender)
+    gender_emoji = {"women": "👩", "men": "👨", "unisex": "👫"}.get(
+        spec.target_gender, "👫"
+    )
+    png_text = "не добавлен"
     print_source_text = "исходное фото товара"
     if print_asset:
         transparency = (
-            "прозрачный фон есть"
+            "✅ прозрачный фон"
             if print_asset.has_transparency
-            else "прозрачного фона нет"
+            else "⚠️ без прозрачности"
         )
         png_text = (
-            f"добавлен, {print_asset.width_px}x{print_asset.height_px} px, "
-            f"{transparency}, видимая область {print_asset.content_width_px}x"
+            f"добавлен, {print_asset.width_px}×{print_asset.height_px} px, "
+            f"{transparency}, видимая область {print_asset.content_width_px}×"
             f"{print_asset.content_height_px} px"
         )
-        print_source_text = "исходное фото товара + отдельный PNG"
+        print_source_text = "исходное фото + отдельный PNG"
     if spec.geometry_mode == "source-guided":
         geometry_text = (
-            "Положение принта: беру напрямую из исходного фото\n"
+            "📐 Положение принта: напрямую из исходного фото\n"
             "Точное измерение границ не требуется\n"
         )
     else:
         geometry_text = (
-            "Размер относительно рабочей части изделия:\n"
-            f"- ширина принта: {spec.print_width_percent}%\n"
-            f"- высота принта: {spec.print_height_percent}%\n"
-            f"- отступ слева: {spec.print_left_offset_percent}%\n"
-            f"- отступ сверху: {spec.print_top_offset_percent}%\n"
-            f"- центр по ширине: {spec.print_center_x_percent}%\n"
-            f"Уверенность измерения принта: {spec.analysis_confidence}%\n"
+            "📐 Размер относительно рабочей части изделия:\n"
+            f"  ширина: {spec.print_width_percent}% | "
+            f"высота: {spec.print_height_percent}%\n"
+            f"  слева: {spec.print_left_offset_percent}% | "
+            f"сверху: {spec.print_top_offset_percent}%\n"
+            f"  центр: {spec.print_center_x_percent}%\n"
+            f"  уверенность: {spec.analysis_confidence}%\n"
         )
     return (
-        "Анализ макета готов\n\n"
-        f"Изделие: {_GARMENT_LABELS.get(spec.garment_type, spec.garment_type)}\n"
-        f"Сторона: {side}\n"
-        f"Цвет: {spec.shirt_color}\n"
-        f"Ткань: {spec.fabric_finish}\n"
-        f"Крой: {spec.fit}\n"
-        f"Конструкция: {spec.construction_details}\n\n"
-        f"Категория: {_GENDER_LABELS.get(spec.target_gender, spec.target_gender)}\n"
-        f"Возраст: {_AGE_LABELS.get(spec.target_age_group, spec.target_age_group)}\n"
-        f"Настроение: {mood_text}\n"
-        f"Тема принта: {spec.print_theme}\n\n"
+        "✅ Анализ макета готов\n\n"
+        f"👕 Изделие: {_GARMENT_LABELS.get(spec.garment_type, spec.garment_type)}\n"
+        f"↔️ Сторона: {side}\n"
+        f"🎨 Цвет: {spec.shirt_color}\n"
+        f"🧵 Ткань: {spec.fabric_finish} | Крой: {spec.fit}\n"
+        f"🔧 {spec.construction_details}\n\n"
+        f"{gender_emoji} Модель: {gender_label}\n"
+        f"🎯 Возраст: {_AGE_LABELS.get(spec.target_age_group, spec.target_age_group)}\n"
+        f"💫 Настроение: {mood_text}\n"
+        f"🖼 Тема: {spec.print_theme}\n\n"
         f"{geometry_text}\n"
-        f"Источник принта: {print_source_text}\n"
-        f"Отдельный PNG: {png_text}\n\n"
-        "Выберите способ создания фото:\n"
-        "Простой - локальная обработка без платной генерации.\n"
-        "Сложный - создание через Gemini.\n"
-        "Отдельный PNG можно добавить только при необходимости."
+        f"📦 Источник: {print_source_text}\n"
+        f"🖨 PNG: {png_text}\n\n"
+        "Выберите способ создания:\n"
+        "• Простой — локально, бесплатно\n"
+        "• Сложный — через Gemini (платно)\n"
+        "• PNG можно добавить при необходимости"
     )
 
 
@@ -898,6 +901,8 @@ def build_router(
         state: FSMContext,
         replace_current: bool = False,
     ) -> bool:
+        if await state.get_state() == DraftStates.generating_model_photos.state:
+            return False
         data = await restore_model_draft(state, message.chat.id)
         raw_spec = data.get("model_mockup_spec")
         if not raw_spec:
@@ -3834,138 +3839,6 @@ def build_router(
                 f"Пост #{post_id} запланирован на "
                 f"{format_local(scheduled_at, config.timezone)}."
             )
-
-    @router.callback_query(F.data.startswith("model:generate:"))
-    async def preview_and_confirm_reference(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config, repository):
-            return
-        mode = callback.data.split(":")[-1]
-        data = await state.get_data()
-        spec_dict = data.get("model_spec")
-        if not spec_dict:
-            await callback.answer("Черновик макета устарел. Отправьте макет заново.", show_alert=True)
-            return
-        spec = MockupSpec.from_dict(spec_dict)
-        direction_index = int(data.get("model_direction_index", 0))
-        directions = data.get("model_directions", [])
-        if not directions or direction_index >= len(directions):
-            await callback.answer("Направления не найдены.", show_alert=True)
-            return
-        direction = SimpleNamespace(**directions[direction_index])
-        
-        excluded_ids = list(data.get("model_excluded_ref_ids", []))
-        rejected_ids = list(repository.get_rejected_reference_ids(spec.garment_type))
-        all_excluded = set(excluded_ids).union(rejected_ids)
-
-        token = f"confirm:{callback.message.chat.id}:{secrets.token_hex(4)}"
-        candidate = reference_catalog.select_reference(
-            garment_type=spec.garment_type,
-            target_gender=direction.gender,
-            moods=spec.moods,
-            request_token=token,
-            print_side=spec.side,
-            exclude_ids=list(all_excluded),
-            simple_only=(mode == "local"),
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
-
-        if candidate is None:
-            if callback.message:
-                await callback.message.edit_text(
-                    "⚠️ <b>В базе пока нет готовых подходящих референсов.</b>\n\n"
-                    "Вы можете найти новые подходящие референсы через поиск Pinterest и прислать их боту:",
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🔍 Найти референсы в Pinterest",
-                                    callback_data="model:search-references",
-                                )
-                            ],
-                            [InlineKeyboardButton(text="Отмена", callback_data="model:cancel")],
-                        ]
-                    ),
-                )
-            await callback.answer()
-            return
-
-        await state.update_data(
-            confirming_mode=mode,
-            confirming_ref_id=candidate.id,
-            confirming_token=token,
-        )
-        await state.set_state(DraftStates.confirming_reference)
-
-        ref_image = candidate.simple_image_bytes or candidate.image_bytes
-        caption = (
-            f"📷 <b>Найден подходящий референс #{candidate.id}</b>\n\n"
-            f"• <b>Изделие:</b> {spec.garment_type}\n"
-            f"• <b>Категория:</b> {direction.gender}\n"
-            f"• <b>Ракурс/Стиль:</b> {candidate.tags.get('camera_angle', 'натуральный')}\n"
-            f"• <b>Видимость зоны:</b> {candidate.tags.get('print_area_visibility', 90)}%\n\n"
-            f"Использовать этот референс для создания фото?"
-        )
-        await callback.answer()
-        if callback.message:
-            if ref_image:
-                await callback.message.answer_photo(
-                    photo=BufferedInputFile(ref_image, filename=f"ref_{candidate.id}.jpg"),
-                    caption=caption,
-                    reply_markup=reference_preview_keyboard(candidate.id, mode),
-                )
-            else:
-                await callback.message.answer(
-                    caption,
-                    reply_markup=reference_preview_keyboard(candidate.id, mode),
-                )
-
-    @router.callback_query(F.data.startswith("ref:approve:"))
-    async def approve_reference_choice(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config, repository):
-            return
-        _, _, mode, ref_id_str = callback.data.split(":", 3)
-        ref_id = int(ref_id_str)
-        data = await state.get_data()
-        spec_dict = data.get("model_spec")
-        garment_type = spec_dict.get("garment_type", "") if spec_dict else ""
-
-        repository.record_reference_feedback(ref_id, "liked", garment_type=garment_type)
-        await state.update_data(
-            model_confirmed_reference_id=ref_id,
-            model_confirmed_usage_token=data.get("confirming_token"),
-        )
-        await callback.answer("✅ Референс одобрен! Начинаю генерацию...", show_alert=False)
-        if callback.message:
-            await callback.message.edit_reply_markup(reply_markup=None)
-            status_msg = await callback.message.answer("⚙️ Создаю фото на модели...")
-            await run_model_generation(
-                status_message=status_msg,
-                state=state,
-                requested_generation_mode=mode,
-                confirmed_reference_id=ref_id,
-                confirmed_usage_token=data.get("confirming_token"),
-            )
-
-    @router.callback_query(F.data.startswith("ref:reject:"))
-    async def reject_reference_choice(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await is_admin_callback(callback, config, repository):
-            return
-        _, _, mode, ref_id_str = callback.data.split(":", 3)
-        ref_id = int(ref_id_str)
-        data = await state.get_data()
-        spec_dict = data.get("model_spec")
-        garment_type = spec_dict.get("garment_type", "") if spec_dict else ""
-
-        repository.record_reference_feedback(ref_id, "rejected", garment_type=garment_type)
-        excluded_ids = list(data.get("model_excluded_ref_ids", []))
-        excluded_ids.append(ref_id)
-        await state.update_data(model_excluded_ref_ids=excluded_ids)
-
-        await callback.answer("❌ Референс отклонен. Ищу следующий...", show_alert=False)
-        if callback.message:
-            await callback.message.edit_reply_markup(reply_markup=None)
-            await preview_and_confirm_reference(callback, state)
 
     @router.message()
     async def fallback(message: Message, state: FSMContext, bot: Bot) -> None:

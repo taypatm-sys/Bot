@@ -153,6 +153,7 @@ async def main() -> None:
                 BotCommand(command="template", description="Шаблон подписи"),
                 BotCommand(command="settemplate", description="Изменить шаблон"),
                 BotCommand(command="presets", description="Готовые пресеты"),
+                BotCommand(command="start_post", description="Создать пост с макетом"),
                 BotCommand(command="model", description="Фото на модели"),
                 BotCommand(command="references", description="База референсов"),
                 BotCommand(command="check", description="Проверить настройки"),

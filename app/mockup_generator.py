@@ -1179,6 +1179,12 @@ def build_model_photo_prompt(
             "shadow remnants, partial letters, or any visual artifact from the reference "
             "photo's original print. If you can see even one pixel from the reference's "
             "original artwork in the output, the generation has FAILED.\n"
+            "- DIFFERENT PERSON REQUIREMENT: The generated model must be a COMPLETELY "
+            "DIFFERENT person from the one in the reference photo. Use a different face, "
+            "different hairstyle, different body type, and different ethnicity. Do NOT "
+            "clone or closely resemble the reference person's appearance. The reference "
+            "controls ONLY composition, pose, camera angle and background — NOT the "
+            "person's identity, face, or look.\n"
             "- No crowd, no group of pedestrians and no busy public background. Do not "
             "add extra people. Keep the scene visually quiet and product-focused.\n"
             "- For clothing, the wearer must be close enough that the garment and print "
@@ -1278,8 +1284,12 @@ def build_model_photo_prompt(
         f"0. {source_rule}\n"
         "1. Transfer the complete print as locked source artwork. Preserve every "
         "visible letter, number, face within the art, line, ornament, spacing, color "
-        "relationship, outer contour and aspect ratio. Do not redraw, rewrite, "
-        "translate, correct, simplify, crop, extend, duplicate or invent anything.\n"
+        "relationship, outer contour and aspect ratio at MAXIMUM FIDELITY. Do not redraw, rewrite, "
+        "translate, correct, simplify, crop, extend, duplicate or invent anything. "
+        "If a separate high-resolution PNG print image is provided, it is the MASTER "
+        "source for every pixel of the artwork. Copy its exact lines, colors, shading "
+        "and details with the highest possible precision. The print on the final garment "
+        "must look as sharp and detailed as the PNG source allows.\n"
         "2. Transparent or empty space around separate artwork elements must remain "
         "the garment's own fabric. Never invent a rectangular backing, dark box, "
         "poster edge, halo or border unless that shape is clearly part of the source "
@@ -1300,6 +1310,9 @@ def build_model_photo_prompt(
         "A hand, bag, cup or prop may overlap a small non-printed area naturally, but never hide the print.\n"
         "- The model must have clean flawless skin, handsome/attractive aesthetic facial features, neat well-groomed hair, "
         "and a stylish streetwear lookbook appearance. No facial blemishes, skin acne, or unnatural distortions.\n"
+        "- IMPORTANT: Generate a COMPLETELY NEW fictional person. Do NOT copy or clone the "
+        "appearance, face, hairstyle, or ethnicity of any person visible in the reference "
+        "photo. The wearer must look distinctly different from the reference person.\n"
         "- The person gender must match the intended audience found in the artwork.\n\n"
         "EDITORIAL LOOKBOOK REALISM:\n"
         "- Use a crisp 35 mm portrait lens, natural outdoor daylight, photorealistic skin texture, "
@@ -1730,7 +1743,11 @@ class MockupGenerator:
         if print_image_bytes:
             contents.extend(
                 [
-                    "Exact isolated print source follows:",
+                    "HIGH-RESOLUTION PRINT SOURCE (Image 2): This is the MASTER artwork "
+                    "at maximum quality. Copy every line, color, shading, letter and detail "
+                    "from this image with pixel-level precision. The print on the garment "
+                    "must match this source exactly. Do not simplify, blur, or lose any "
+                    "detail from this image:",
                     types.Part.from_bytes(
                         data=print_image_bytes,
                         mime_type=print_mime_type or "image/png",

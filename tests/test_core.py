@@ -1374,5 +1374,47 @@ class UserFeedbackAndAIMemoryTests(unittest.TestCase):
                 repository.close()
 
 
+
+class HandlersUXTests(unittest.TestCase):
+    def test_main_keyboard_contains_model_button(self) -> None:
+        from app.handlers import main_keyboard
+
+        kb = main_keyboard()
+        button_texts = [
+            btn.text
+            for row in kb.keyboard
+            for btn in row
+        ]
+        self.assertIn("Создать пост", button_texts)
+        self.assertIn("Фото на модели", button_texts)
+
+    def test_format_model_analysis_renders_emoji_and_gender(self) -> None:
+        from app.handlers import format_model_analysis
+
+        spec = MockupSpec(
+            side="front",
+            garment_type="t-shirt",
+            shirt_color="black",
+            fabric_finish="100% cotton",
+            fit="oversized",
+            target_gender="women",
+            target_age_group="18-24",
+            moods=["bold", "street"],
+            print_theme="urban typography",
+            construction_details="crew neck",
+            print_width_percent=35,
+            print_height_percent=45,
+            print_left_offset_percent=32,
+            print_top_offset_percent=20,
+            print_center_x_percent=50,
+            analysis_confidence=95,
+        )
+        output = format_model_analysis(spec)
+        self.assertIn("👩 Модель: женская", output)
+        self.assertIn("👕 Изделие: футболка", output)
+        self.assertIn("↔️ Сторона: спереди", output)
+
+
 if __name__ == "__main__":
     unittest.main()
+
