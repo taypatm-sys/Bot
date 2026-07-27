@@ -1097,7 +1097,8 @@ def build_model_photo_prompt(
             "for exact garment type, color, wash, cut, fit, construction, AND EXACT PRINT SCALE AND PLACEMENT. "
             "Image 2 is EXACT PRINT SOURCE and must be copied without redrawing or changing text. "
             "Image 3 is STYLE REFERENCE ONLY and controls camera distance, crop, pose, lighting direction and background. "
-            "DO NOT USE THE PRINT SIZE FROM IMAGE 3. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
+            "DO NOT USE THE PRINT SIZE OR ANY TEXT FROM IMAGE 3. COPY THE PRINT SCALE, POSITION, TEXT AND ARTWORK DIRECTLY FROM IMAGE 1 AND IMAGE 2 ONLY. "
+            "STRICT PROHIBITION OF REFERENCE TEXT LEAKS: Never copy or read any word, text, or graphic visible on Image 3's garment (e.g. 'always late' or any other words). "
             "MANDATORY ERASURE: Before placing the print, COMPLETELY ERASE and REMOVE "
             "every trace of any print, text, logo, graphic, or artwork that was originally "
             "visible on the garment in Image 3. Render the garment surface as clean blank fabric first, "
@@ -1111,7 +1112,8 @@ def build_model_photo_prompt(
             "from the same product and locks every letter, outline, spacing and color. "
             "Image 3 is STYLE REFERENCE ONLY and controls pose, camera, crop, lighting "
             "direction and background. "
-            "DO NOT USE THE PRINT SIZE FROM IMAGE 3. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
+            "DO NOT USE THE PRINT SIZE OR ANY TEXT FROM IMAGE 3. COPY THE PRINT SCALE, POSITION, TEXT AND ARTWORK DIRECTLY FROM IMAGE 1 AND IMAGE 2 ONLY. "
+            "STRICT PROHIBITION OF REFERENCE TEXT LEAKS: Never copy or read any word, text, or graphic visible on Image 3's garment. "
             "MANDATORY ERASURE: Before placing the print, COMPLETELY ERASE and REMOVE "
             "every trace of any print, text, logo, graphic, or artwork that was originally "
             "visible on the garment in Image 3. Render the garment surface as clean blank fabric first, "
@@ -1135,7 +1137,8 @@ def build_model_photo_prompt(
             "construction, print pixels, print text, AND PRINT SCALE AND PLACEMENT. "
             "Image 2 is STYLE REFERENCE ONLY: use only its camera distance, crop, body orientation, "
             "pose, lighting direction and background. "
-            "DO NOT USE THE PRINT SIZE FROM IMAGE 2. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
+            "DO NOT USE THE PRINT SIZE OR ANY TEXT FROM IMAGE 2. COPY THE PRINT SCALE, POSITION, TEXT AND ARTWORK DIRECTLY FROM IMAGE 1 ONLY. "
+            "STRICT PROHIBITION OF REFERENCE TEXT LEAKS: The style reference photo (Image 2) contains its own original printed text. YOU ARE STRICTLY PROHIBITED FROM COPYING OR READING ANY WORDS OR TEXT FROM IMAGE 2! Every letter and word on the final garment MUST come 100% EXCLUSIVELY from Image 1. "
             "MANDATORY ERASURE: Before placing the print from Image 1, COMPLETELY ERASE "
             "and REMOVE every trace of any print, text, logo, graphic, or artwork that "
             "was originally visible on the garment in Image 2. First render the garment "
@@ -1272,7 +1275,8 @@ def build_model_photo_prompt(
         "1. Transfer the complete print as locked source artwork. Preserve every "
         "visible letter, number, face within the art, line, ornament, spacing, color "
         "relationship, outer contour and aspect ratio at MAXIMUM FIDELITY. Do not redraw, rewrite, "
-        "translate, correct, simplify, crop, extend, duplicate or invent anything. "
+        "translate, correct, simplify, crop, extend, duplicate, omit or invent anything. "
+        "CRITICAL COMPOSITE ARTWORK INTEGRITY: Transfer every illustration element, human figure, carpet detail, and text heading from Image 1 in full without erasing, omitting, or corrupting any person or letter. "
         "If a separate high-resolution PNG print image is provided, it is the MASTER "
         "source for every pixel of the artwork. Copy its exact lines, colors, shading "
         "and details with the highest possible precision. The print on the final garment "
@@ -1756,8 +1760,11 @@ class MockupGenerator:
         if reference_image_bytes:
             contents.extend(
                 [
-                    "Manually selected photographic composition reference follows. "
-                    "Use it for pose, crop, camera distance and scene simplicity only:",
+                    "PHOTOGRAPHIC STYLE AND POSE REFERENCE ONLY (Image 3):\n"
+                    "WARNING: The clothing in this reference photo contains its own original printed text and graphics. "
+                    "DO NOT COPY ANY TEXT, WORD, LOGO, OR GRAPHIC FROM THIS REFERENCE IMAGE! "
+                    "ERASE ALL TEXT AND GRAPHICS VISIBLE ON THIS REFERENCE IMAGE BEFORE GENERATING. "
+                    "Use this image ONLY for pose, camera distance, background setting, and lighting direction:",
                     types.Part.from_bytes(
                         data=reference_image_bytes,
                         mime_type=reference_mime_type or "image/jpeg",
