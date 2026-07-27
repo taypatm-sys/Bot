@@ -46,6 +46,15 @@ async def main() -> None:
         database_url=repository.database_url,
         bot_token=config.telegram_bot_token,
     )
+    if repository.get_setting("last_mockup_status") == "OpenAI: запрос отправлен":
+        repository.set_setting(
+            "last_mockup_status", "OpenAI: запрос прерван перезапуском"
+        )
+        repository.set_setting(
+            "last_mockup_error",
+            "Сервис был перезапущен после отправки платного запроса. "
+            "Проверьте OpenAI Usage. Не повторяйте запрос автоматически.",
+        )
     repository.recover_interrupted_posts()
     reset_simple = repository.reset_legacy_simple_level_b_for_revalidation()
     if reset_simple:
@@ -81,6 +90,7 @@ async def main() -> None:
         image_model=config.openai_image_model,
         image_size=config.openai_image_size,
         image_quality=config.openai_image_quality,
+        fallback_cost_usd=config.openai_image_cost_usd,
     )
     reference_catalog = ReferenceCatalog(
         repository=repository,

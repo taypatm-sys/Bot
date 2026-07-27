@@ -784,6 +784,15 @@ class PhotoDirection:
 class GeneratedModelPhoto:
     data: bytes
     mime_type: str
+    provider_request_id: str = ""
+    usage_input_tokens: int = 0
+    usage_input_image_tokens: int = 0
+    usage_input_text_tokens: int = 0
+    usage_output_tokens: int = 0
+    usage_output_image_tokens: int = 0
+    usage_output_text_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_source: str = ""
 
     @property
     def extension(self) -> str:
@@ -791,9 +800,19 @@ class GeneratedModelPhoto:
 
 
 class MockupGenerationError(RuntimeError):
-    def __init__(self, user_message: str):
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        provider_request_id: str = "",
+        estimated_cost_usd: float = 0.0,
+        cost_source: str = "",
+    ):
         super().__init__(user_message)
         self.user_message = user_message
+        self.provider_request_id = provider_request_id
+        self.estimated_cost_usd = max(0.0, float(estimated_cost_usd or 0.0))
+        self.cost_source = cost_source
 
 
 class MockupAnalysisError(RuntimeError):

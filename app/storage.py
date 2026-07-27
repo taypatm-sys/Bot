@@ -417,6 +417,33 @@ class PostRepository:
             self._execute(
                 connection,
                 f"""
+                CREATE TABLE IF NOT EXISTS generation_artifacts (
+                    id {id_column},
+                    chat_id BIGINT NOT NULL,
+                    request_token TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    image_bytes {binary_column} NOT NULL,
+                    caption TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    last_error TEXT,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                )
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE INDEX IF NOT EXISTS idx_generation_artifacts_pending
+                ON generation_artifacts(chat_id, status, id)
+                """,
+            )
+            self._execute(
+                connection,
+                f"""
                 CREATE TABLE IF NOT EXISTS reference_user_feedback (
                     id {id_column},
                     reference_id BIGINT NOT NULL,
@@ -564,6 +591,107 @@ class PostRepository:
                 """,
                 (key, value, now),
             )
+
+    def save_generation_artifact(
+        self,
+        *,
+        chat_id: int,
+        request_token: str,
+        provider: str,
+        model: str,
+        mime_type: str,
+        file_name: str,
+        image_bytes: bytes,
+        caption: str,
+    ) -> int:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO generation_artifacts(
+                    chat_id, request_token, provider, model, mime_type,
+                    file_name, image_bytes, caption, status, last_error,
+                    created_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                ON CONFLICT(request_token) DO UPDATE SET
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    mime_type = excluded.mime_type,
+                    file_name = excluded.file_name,
+                    image_bytes = excluded.image_bytes,
+                    caption = excluded.caption,
+                    status = 'pending',
+                    last_error = NULL,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    chat_id,
+                    request_token,
+                    provider,
+                    model,
+                    mime_type,
+                    file_name,
+                    image_bytes,
+                    caption,
+                    now,
+                    now,
+                ),
+            )
+            row = self._execute(
+                connection,
+                "SELECT id FROM generation_artifacts WHERE request_token = ?",
+                (request_token,),
+            ).fetchone()
+        return int(row["id"])
+
+    def get_latest_pending_generation_artifact(self, chat_id: int) -> Optional[dict[str, Any]]:
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM generation_artifacts
+                WHERE chat_id = ? AND status = 'pending'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_generation_artifact_error(self, artifact_id: int, error: str) -> None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE generation_artifacts
+                SET last_error = ?, updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (error[:1000], now, artifact_id),
+            )
+
+    def delete_generation_artifact(self, artifact_id: int) -> None:
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "DELETE FROM generation_artifacts WHERE id = ?",
+                (artifact_id,),
+            )
+
+    def pending_generation_artifact_count(self, chat_id: int) -> int:
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT COUNT(*) AS amount
+                FROM generation_artifacts
+                WHERE chat_id = ? AND status = 'pending'
+                """,
+                (chat_id,),
+            ).fetchone()
+        return int(row["amount"] if row else 0)
 
     def list_extra_admin_ids(self) -> list[int]:
         with self._connect() as connection:

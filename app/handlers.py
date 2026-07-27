@@ -1,7 +1,9 @@
 import asyncio
+import html
 import io
 import logging
 import secrets
+import textwrap
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -44,7 +46,10 @@ from app.mockup_generator import (
     choose_photo_directions,
     ensure_mockup_spec_ready,
 )
-from app.openai_mockup_generator import OpenAIMockupGenerator
+from app.openai_mockup_generator import (
+    OpenAIMockupGenerator,
+    estimate_openai_image_cost_usd,
+)
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
 from app.scheduling import (
@@ -60,6 +65,162 @@ from app.template_store import CaptionTemplateStore
 
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
+
+_TSHIRT_TYPES = {"t-shirt", "tshirt", "tee", "tee-shirt", "футболка"}
+
+
+def _normalized_fit_for_generation(garment_type: str, fit: str) -> str:
+    garment = (garment_type or "").strip().casefold()
+    if garment in _TSHIRT_TYPES:
+        return "moderately oversized fit"
+    return (fit or "regular").strip() or "regular"
+
+
+def _fit_label_for_display(garment_type: str, fit: str) -> str:
+    garment = (garment_type or "").strip().casefold()
+    if garment in _TSHIRT_TYPES:
+        return "умеренный оверсайз"
+    clean = (fit or "").strip()
+    return clean or "standard"
+
+
+def _format_usd(amount: float) -> str:
+    return f"${amount:.4f}" if amount < 1 else f"${amount:.2f}"
+
+
+def _estimated_generation_cost_usd(provider: str, config: Config) -> float:
+    if provider == "openai":
+        configured = max(0.0, float(config.openai_image_cost_usd or 0.0))
+        return configured or estimate_openai_image_cost_usd(
+            config.openai_image_model,
+            _openai_request_size(config),
+            config.openai_image_quality,
+        )
+    if provider == "gemini":
+        return max(0.0, float(config.gemini_image_cost_usd or 0.0))
+    return 0.0
+
+
+def _openai_request_size(config: Config) -> str:
+    if config.openai_image_model == "gpt-image-2":
+        return config.openai_image_size
+    if config.openai_image_size in {"1024x1024", "1024x1536", "1536x1024", "auto"}:
+        return config.openai_image_size
+    return "1024x1536"
+
+
+def _setting_float(repository: PostRepository, key: str) -> float:
+    raw = repository.get_setting(key)
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_generation_cost(repository: PostRepository, *, provider: str, amount_usd: float) -> None:
+    repository.set_setting("last_generation_cost_usd", f"{amount_usd:.6f}")
+    repository.set_setting("last_generation_cost_provider", provider or "local")
+    total = _setting_float(repository, "total_generation_cost_usd") + max(0.0, amount_usd)
+    repository.set_setting("total_generation_cost_usd", f"{total:.6f}")
+
+
+def _check_table(sections: list[tuple[str, list[tuple[str, object]]]]) -> str:
+    label_width = 17
+    value_width = 23
+    lines: list[str] = []
+    for section_index, (title, rows) in enumerate(sections):
+        if section_index:
+            lines.append("")
+        lines.append(title.upper())
+        lines.append("-" * (label_width + value_width + 1))
+        for label, raw_value in rows:
+            value = str(raw_value if raw_value not in {None, ""} else "-")
+            chunks = textwrap.wrap(
+                value,
+                width=value_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or ["-"]
+            lines.append(f"{label[:label_width]:<{label_width}} {chunks[0]}")
+            for chunk in chunks[1:]:
+                lines.append(f"{'':<{label_width}} {chunk}")
+    return "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+
+def _build_check_report(
+    *,
+    bot_username: str,
+    channel_name: str,
+    channel_status: str,
+    config: Config,
+    repository: PostRepository,
+    chat_id: int,
+) -> str:
+    ready_references = repository.reference_stats().get("ready", 0)
+    last_reference_id = repository.get_setting("last_mockup_reference_id") or "нет"
+    last_reference_label = f"#{last_reference_id}" if last_reference_id != "нет" else "нет"
+    extra_admins = repository.list_extra_admin_ids()
+    admin_count = len(set(config.admin_ids).union(extra_admins))
+    pending_results = repository.pending_generation_artifact_count(chat_id)
+    openai_status = "настроен" if config.openai_api_key else "ключ не добавлен"
+    return _check_table(
+        [
+            (
+                "Система",
+                [
+                    ("Бот", f"@{bot_username}"),
+                    ("Канал", channel_name),
+                    ("Права", channel_status),
+                    ("База", repository.backend_name),
+                    ("Администраторы", admin_count),
+                ],
+            ),
+            (
+                "Провайдеры",
+                [
+                    ("Простой режим", "готов, бесплатно"),
+                    ("Gemini", config.gemini_image_model),
+                    ("OpenAI", f"{openai_status}: {config.openai_image_model}"),
+                    ("OpenAI запрос", _openai_request_size(config)),
+                    ("Итоговый формат", "1024x1280, 4:5"),
+                    ("Качество", config.openai_image_quality),
+                    ("Автоповторы API", "выключены"),
+                ],
+            ),
+            (
+                "Последняя генерация",
+                [
+                    ("Статус", repository.get_setting("last_mockup_status") or "не запускалась"),
+                    ("Провайдер", repository.get_setting("last_mockup_provider") or "-"),
+                    ("Модель", repository.get_setting("last_mockup_model") or "-"),
+                    ("Референс", last_reference_label),
+                    ("Референс передан", repository.get_setting("last_mockup_reference_passed") or "-"),
+                    ("Проверка", repository.get_setting("last_mockup_preflight_mode") or "-"),
+                    ("Request ID", repository.get_setting("last_openai_request_id") or "-"),
+                    ("Ожидает отправки", pending_results),
+                    ("Ошибка", repository.get_setting("last_mockup_error") or "-"),
+                ],
+            ),
+            (
+                "Расходы",
+                [
+                    ("Последняя", _format_usd(_setting_float(repository, "last_generation_cost_usd"))),
+                    ("Источник расчета", repository.get_setting("last_generation_cost_source") or "оценка"),
+                    ("Всего", _format_usd(_setting_float(repository, "total_generation_cost_usd"))),
+                ],
+            ),
+            (
+                "Референсы",
+                [
+                    ("Готово", ready_references),
+                    ("Автозамен", repository.get_setting("last_mockup_reference_replacements") or "0"),
+                    ("Поиск", repository.get_setting("pinterest_discovery_status") or "выключен"),
+                ],
+            ),
+        ]
+    )
 
 
 class DraftStates(StatesGroup):
@@ -89,42 +250,16 @@ class DraftStates(StatesGroup):
     preview = State()
 
 
-def reference_preview_keyboard(reference_id: int, mode: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👍 Использовать этот референс",
-                    callback_data=f"ref:approve:{mode}:{reference_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👎 Найти другой референс",
-                    callback_data=f"ref:reject:{mode}:{reference_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔍 Поиск референсов в Pinterest без API",
-                    callback_data="model:search-references",
-                )
-            ],
-            [InlineKeyboardButton(text="Отмена", callback_data="model:cancel")],
-        ]
-    )
-
-
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="Создать пост"),
-                KeyboardButton(text="Фото на модели"),
+                KeyboardButton(text="📝 Создать пост"),
+                KeyboardButton(text="👕 Фото на модели"),
             ],
             [
-                KeyboardButton(text="Очередь"),
-                KeyboardButton(text="Настройки"),
+                KeyboardButton(text="🕒 Очередь"),
+                KeyboardButton(text="⚙️ Настройки"),
             ],
         ],
         resize_keyboard=True,
@@ -135,17 +270,17 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Пресеты", callback_data="settings:presets"),
-                InlineKeyboardButton(text="Шаблон", callback_data="settings:template"),
+                InlineKeyboardButton(text="🩺 Проверка", callback_data="settings:check"),
+                InlineKeyboardButton(text="🖼 Референсы", callback_data="settings:references"),
             ],
             [
-                InlineKeyboardButton(text="Референсы", callback_data="settings:references"),
-                InlineKeyboardButton(text="Проверка", callback_data="settings:check"),
+                InlineKeyboardButton(text="👥 Администраторы", callback_data="settings:admins"),
+                InlineKeyboardButton(text="🧾 Пресеты", callback_data="settings:presets"),
             ],
             [
-                InlineKeyboardButton(text="Администраторы", callback_data="settings:admins"),
+                InlineKeyboardButton(text="📝 Шаблон поста", callback_data="settings:template"),
             ],
-            [InlineKeyboardButton(text="Закрыть", callback_data="settings:close")],
+            [InlineKeyboardButton(text="✖ Закрыть", callback_data="settings:close")],
         ]
     )
 
@@ -224,6 +359,40 @@ def model_batch_keyboard(batch_id: str, count: int) -> InlineKeyboardMarkup:
     )
 
 
+def pending_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📤 Отправить готовый результат",
+                    callback_data="model:resend-pending",
+                )
+            ],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="model:cancel")],
+        ]
+    )
+
+
+def check_keyboard(*, has_pending_result: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_pending_result:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📤 Отправить готовый результат",
+                    callback_data="model:resend-pending",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="settings:check"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings:back"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def model_analysis_keyboard(*, has_print: bool, current_gender: str = "unisex") -> InlineKeyboardMarkup:
     print_label = (
         "Заменить дополнительный PNG"
@@ -251,23 +420,23 @@ def model_analysis_keyboard(*, has_print: bool, current_gender: str = "unisex") 
             ],
             [
                 InlineKeyboardButton(
-                    text="Простой - бесплатно",
+                    text="🟢 Простой - бесплатно",
                     callback_data="model:generate:local",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="Gemini",
+                    text="🔵 Gemini",
                     callback_data="model:generate:gemini",
                 ),
                 InlineKeyboardButton(
-                    text="OpenAI",
+                    text="🟣 OpenAI",
                     callback_data="model:generate:openai",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="Найти референсы без API",
+                    text="🔎 Найти референсы",
                     callback_data="model:search-references",
                 )
             ],
@@ -279,7 +448,7 @@ def model_analysis_keyboard(*, has_print: bool, current_gender: str = "unisex") 
             ],
             [
                 InlineKeyboardButton(
-                    text="Отправить другой макет",
+                    text="🔄 Другой макет",
                     callback_data="model:restart",
                 ),
                 InlineKeyboardButton(
@@ -302,7 +471,7 @@ def model_analysis_retry_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Отправить другой макет",
+                    text="🔄 Другой макет",
                     callback_data="model:restart",
                 ),
                 InlineKeyboardButton(
@@ -436,7 +605,7 @@ def format_model_analysis(
         f"👕 Изделие: {_GARMENT_LABELS.get(spec.garment_type, spec.garment_type)}\n"
         f"↔️ Сторона: {side}\n"
         f"🎨 Цвет: {spec.shirt_color}\n"
-        f"🧵 Ткань: {spec.fabric_finish} | Крой: {spec.fit}\n"
+        f"🧵 Ткань: {spec.fabric_finish} | Крой: {_fit_label_for_display(spec.garment_type, spec.fit)}\n"
         f"🔧 {spec.construction_details}\n\n"
         f"{gender_emoji} Модель: {gender_label}\n"
         f"🎯 Возраст: {_AGE_LABELS.get(spec.target_age_group, spec.target_age_group)}\n"
@@ -532,7 +701,7 @@ def paid_preview_keyboard(provider: str) -> InlineKeyboardMarkup:
                     text="Другой референс",
                     callback_data=f"model:paid-other:{provider}",
                 ),
-                InlineKeyboardButton(text="Отмена", callback_data="model:cancel"),
+                InlineKeyboardButton(text="✖ Отмена", callback_data="model:cancel"),
             ],
         ]
     )
@@ -872,6 +1041,7 @@ def build_router(
     ai_assistant: AIAssistant,
 ) -> Router:
     router = Router()
+    generation_locks: dict[int, asyncio.Lock] = {}
 
     required_draft_fields = {"photo_file_id", "title", "description"}
 
@@ -1145,6 +1315,10 @@ def build_router(
             "construction_details",
             "standard garment construction from the source",
         )
+        stored_spec["fit"] = _normalized_fit_for_generation(
+            str(stored_spec.get("garment_type", "")),
+            str(stored_spec.get("fit", "regular")),
+        )
         return MockupSpec.model_validate({"target_gender": "unisex", **stored_spec})
 
     async def prepare_post_draft(
@@ -1192,6 +1366,27 @@ def build_router(
         return True
 
     async def generate_model_batch(
+        *,
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+        status_message: Message,
+    ) -> None:
+        lock = generation_locks.setdefault(message.chat.id, asyncio.Lock())
+        if lock.locked():
+            await status_message.edit_text(
+                "Генерация уже выполняется. Второй платный запрос не запущен."
+            )
+            return
+        async with lock:
+            await _generate_model_batch_impl(
+                message=message,
+                state=state,
+                bot=bot,
+                status_message=status_message,
+            )
+
+    async def _generate_model_batch_impl(
         *,
         message: Message,
         state: FSMContext,
@@ -1583,10 +1778,17 @@ def build_router(
                 "last_mockup_complexity_reasons",
                 ", ".join(generation_decision.reasons),
             )
+            estimated_cost_usd = _estimated_generation_cost_usd(
+                generation_decision.provider, config
+            )
+            repository.set_setting(
+                "last_mockup_estimated_cost_usd", f"{estimated_cost_usd:.6f}"
+            )
             repository.set_setting("last_mockup_reference_id", str(reference_asset.id))
             repository.set_setting("last_mockup_reference_passed", "да")
             repository.set_setting("last_mockup_reference_count", "1")
             repository.set_setting("last_mockup_status", "генерация")
+            repository.set_setting("last_mockup_error", "")
             if generation_decision.provider == "local":
                 if reference_compatibility.existing_print_present:
                     process_text = (
@@ -1669,6 +1871,13 @@ def build_router(
                             local_composite_safe=False,
                             gemini_lite_model=config.gemini_image_model,
                         )
+                        estimated_cost_usd = _estimated_generation_cost_usd(
+                            generation_decision.provider, config
+                        )
+                        repository.set_setting(
+                            "last_mockup_estimated_cost_usd",
+                            f"{estimated_cost_usd:.6f}",
+                        )
                         repository.set_setting(
                             "last_mockup_provider",
                             generation_decision.provider_label_ru,
@@ -1689,8 +1898,15 @@ def build_router(
                             image_model=generation_decision.model,
                         )
                 elif generation_decision.provider == "openai":
+                    repository.set_setting("last_mockup_error", "")
+                    repository.set_setting("last_openai_request_token", usage_token)
+                    repository.set_setting(
+                        "last_openai_request_started_at", datetime.now(UTC).isoformat()
+                    )
+                    repository.set_setting("last_mockup_status", "OpenAI: запрос отправлен")
                     await status_message.edit_text(
-                        "Запрос передан OpenAI. Генерация изображения может занять несколько минут."
+                        "Запрос передан OpenAI. Генерация изображения может занять несколько минут. "
+                        f"Оценка стоимости: {_format_usd(estimated_cost_usd)}."
                     )
                     generated_photo = await openai_generator.generate_variant(
                         **generator_kwargs,
@@ -1709,10 +1925,32 @@ def build_router(
                     match_score=reference_asset.last_match_score,
                     reason=error.user_message,
                 )
+                charged_cost = max(
+                    0.0, float(getattr(error, "estimated_cost_usd", 0.0) or 0.0)
+                )
+                if charged_cost > 0:
+                    _record_generation_cost(
+                        repository,
+                        provider=generation_decision.provider_label_ru,
+                        amount_usd=charged_cost,
+                    )
+                    repository.set_setting(
+                        "last_generation_cost_source",
+                        str(getattr(error, "cost_source", "provider response") or "provider response"),
+                    )
+                request_id = str(getattr(error, "provider_request_id", "") or "")
+                if request_id:
+                    repository.set_setting("last_openai_request_id", request_id)
                 repository.set_setting("last_mockup_status", "ошибка генерации")
+                repository.set_setting("last_mockup_error", error.user_message)
                 generation_error = error.user_message
                 break
             repository.finish_reference_usage(usage_token, outcome="completed")
+            _record_generation_cost(
+                repository,
+                provider=generation_decision.provider_label_ru,
+                amount_usd=estimated_cost_usd,
+            )
             repository.record_reference_result(
                 reference_asset.id,
                 success=True,
@@ -1720,32 +1958,91 @@ def build_router(
                 reason="успешная генерация для текущего макета",
             )
             repository.set_setting("last_mockup_status", "готово")
-            sent = await message.answer_photo(
-                photo=BufferedInputFile(
-                    generated_photo.data,
-                    filename=(
-                        f"taypa_model_{batch_id}_{index}.{generated_photo.extension}"
-                    ),
-                ),
-                caption=(
-                    f"Вариант {index} из {len(directions)}\n"
-                    f"Референс #{reference_asset.id}\n"
-                    f"{wearer_label.capitalize()}\n"
-                    "Формат 4:5"
-                ),
-                reply_markup=model_photo_keyboard(batch_id, index - 1),
+            repository.set_setting("last_mockup_error", "")
+            if generation_decision.provider == "openai":
+                repository.set_setting(
+                    "last_openai_request_completed_at", datetime.now(UTC).isoformat()
+                )
+            final_cost_usd = (
+                generated_photo.estimated_cost_usd
+                if generated_photo.estimated_cost_usd > 0
+                else estimated_cost_usd
             )
+            # Replace the pre-request estimate with token usage when OpenAI returned it.
+            if abs(final_cost_usd - estimated_cost_usd) > 0.0000001:
+                previous_total = _setting_float(repository, "total_generation_cost_usd")
+                corrected_total = max(0.0, previous_total - estimated_cost_usd + final_cost_usd)
+                repository.set_setting("last_generation_cost_usd", f"{final_cost_usd:.6f}")
+                repository.set_setting("total_generation_cost_usd", f"{corrected_total:.6f}")
+            repository.set_setting(
+                "last_openai_request_id", generated_photo.provider_request_id or ""
+            )
+            repository.set_setting(
+                "last_generation_cost_source", generated_photo.cost_source or "estimate"
+            )
+            caption = (
+                f"Вариант {index} из {len(directions)}\n"
+                f"Референс #{reference_asset.id}\n"
+                f"{wearer_label.capitalize()}\n"
+                "Формат 4:5\n"
+                f"Стоимость генерации: {_format_usd(final_cost_usd)}"
+            )
+            file_name = f"taypa_model_{batch_id}_{index}.{generated_photo.extension}"
+            artifact_id = repository.save_generation_artifact(
+                chat_id=message.chat.id,
+                request_token=usage_token,
+                provider=generation_decision.provider_label_ru,
+                model=generation_decision.model,
+                mime_type=generated_photo.mime_type,
+                file_name=file_name,
+                image_bytes=generated_photo.data,
+                caption=caption,
+            )
+            try:
+                sent = await message.answer_photo(
+                    photo=BufferedInputFile(
+                        generated_photo.data,
+                        filename=file_name,
+                    ),
+                    caption=caption,
+                    reply_markup=model_photo_keyboard(batch_id, index - 1),
+                )
+            except Exception as send_error:
+                logger.exception(
+                    "Изображение создано, но Telegram не принял результат artifact_id=%s",
+                    artifact_id,
+                )
+                repository.mark_generation_artifact_error(artifact_id, str(send_error))
+                repository.set_setting("last_mockup_status", "создано, ожидает отправки")
+                repository.set_setting("last_mockup_error", str(send_error))
+                generation_error = (
+                    "Изображение уже создано и оплачено, но Telegram не принял файл. "
+                    "Новый запрос к OpenAI не нужен. Нажмите «Отправить готовый результат»."
+                )
+                await status_message.edit_text(
+                    generation_error,
+                    reply_markup=pending_result_keyboard(),
+                )
+                break
+            repository.delete_generation_artifact(artifact_id)
             generated_file_ids.append(sent.photo[-1].file_id)
             used_labels.append(direction.label)
             repository.remember_mockup_direction(direction.label, limit=10)
 
         if not generated_file_ids:
             await state.set_state(DraftStates.model_analysis_ready)
+            has_pending_result = (
+                repository.pending_generation_artifact_count(message.chat.id) > 0
+            )
             await status_message.edit_text(
                 generation_error
                 or "Не удалось создать вариант. Анализ и макет сохранены, можно "
                 "попробовать еще раз.",
-                reply_markup=model_analysis_keyboard(has_print=bool(print_file_id)),
+                reply_markup=(
+                    pending_result_keyboard()
+                    if has_pending_result
+                    else model_analysis_keyboard(has_print=bool(print_file_id))
+                ),
             )
             return
 
@@ -1817,54 +2114,19 @@ def build_router(
             bot_info = await bot.get_me()
             chat = await bot.get_chat(config.channel_id)
             member = await bot.get_chat_member(config.channel_id, bot_info.id)
-            ready_references = repository.reference_stats().get("ready", 0)
-            last_reference_id = (
-                repository.get_setting("last_mockup_reference_id") or "нет"
+            report = _build_check_report(
+                bot_username=bot_info.username or str(bot_info.id),
+                channel_name=str(chat.title or chat.id),
+                channel_status=str(member.status),
+                config=config,
+                repository=repository,
+                chat_id=message.chat.id,
             )
-            last_reference_label = (
-                f"#{last_reference_id}" if last_reference_id != "нет" else "нет"
-            )
-            last_reference_passed = (
-                repository.get_setting("last_mockup_reference_passed")
-                or "еще не запускалось"
-            )
-            last_reference_count = (
-                repository.get_setting("last_mockup_reference_count") or "0"
-            )
-            last_mockup_status = (
-                repository.get_setting("last_mockup_status") or "еще не запускалось"
-            )
-            last_reference_replacements = (
-                repository.get_setting("last_mockup_reference_replacements") or "0"
-            )
+            pending = repository.pending_generation_artifact_count(message.chat.id) > 0
             await message.answer(
-                "Настройки работают.\n"
-                f"Бот: @{bot_info.username}\n"
-                f"Канал: {chat.title or chat.id}\n"
-                f"Статус бота в канале: {member.status}\n"
-                f"База: {repository.backend_name}\n"
-                f"Администраторов: {len(config.admin_ids)}\n"
-                "Обычные задачи: локально, без оплаты\n"
-                "Сложные задачи: локальная попытка с проверкой\n"
-                f"Gemini: {config.gemini_image_model}\n"
-                f"OpenAI: {'настроен' if config.openai_api_key else 'ключ не добавлен'}"
-                f" ({config.openai_image_model})\n"
-                f"Формат Gemini: {config.gemini_image_size}, 4:5\n"
-                f"Формат OpenAI: {config.openai_image_size}, качество {config.openai_image_quality}\n"
-                "Режим: обязательный проверенный референс\n"
-                f"Референсов готово: {ready_references}\n"
-                f"В последней генерации: {last_reference_count}\n"
-                f"Последний референс: {last_reference_label}\n"
-                f"Автозамен до запуска: {last_reference_replacements}\n"
-                f"Последний провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
-                f"Последняя модель: {repository.get_setting('last_mockup_model') or 'еще не запускалось'}\n"
-                f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
-                f"Сложность: {repository.get_setting('last_mockup_complexity') or 'еще не определялась'}\n"
-                f"Поиск референсов: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
-                
-                
-                f"Референс использован: {last_reference_passed}\n"
-                f"Статус генерации: {last_mockup_status}"
+                report,
+                parse_mode="HTML",
+                reply_markup=check_keyboard(has_pending_result=pending),
             )
         except Exception as error:
             logger.exception("Проверка настроек не пройдена")
@@ -1874,7 +2136,7 @@ def build_router(
                 f"Ошибка: {error}"
             )
 
-    @router.message(F.text == "Настройки")
+    @router.message(F.text.in_({"Настройки", "⚙️ Настройки"}))
     async def show_settings(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config, repository):
             return
@@ -1938,34 +2200,41 @@ def build_router(
     async def settings_check(callback: CallbackQuery, bot: Bot) -> None:
         if not await is_admin_callback(callback, config, repository):
             return
-        ready_references = repository.reference_stats().get("ready", 0)
-        last_reference_id = repository.get_setting("last_mockup_reference_id") or "нет"
-        last_reference_label = (
-            f"#{last_reference_id}" if last_reference_id != "нет" else "нет"
-        )
-        last_reference_count = repository.get_setting("last_mockup_reference_count") or "0"
-        last_reference_passed = repository.get_setting("last_mockup_reference_passed") or "еще не запускалось"
-        last_mockup_status = repository.get_setting("last_mockup_status") or "еще не запускалось"
-        replacements = repository.get_setting("last_mockup_reference_replacements") or "0"
-        bot_info = await bot.get_me()
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer(
-                "Проверка пройдена.\n"
-                f"Бот: @{bot_info.username}\n"
-                f"База: {repository.backend_name}\n"
-                f"Администраторов: {len(config.admin_ids) + len(repository.list_extra_admin_ids())}\n"
-                f"Референсов: {ready_references}\n"
-                f"Последний: {last_reference_label}\n"
-                f"Автозамен: {replacements}\n"
-                f"Провайдер: {repository.get_setting('last_mockup_provider') or 'еще не запускался'}\n"
-                f"Модель: {repository.get_setting('last_mockup_model') or 'еще не запускалась'}\n"
-                f"Проверка референса: {repository.get_setting('last_mockup_preflight_mode') or 'еще не запускалась'}\n"
-                f"Поиск референсов: {repository.get_setting('pinterest_discovery_status') or 'еще не запускался'}\n"
-                
-                f"Референс использован: {last_reference_passed}\n"
-                f"Статус: {last_mockup_status}"
+        if not callback.message:
+            await callback.answer()
+            return
+        try:
+            bot_info = await bot.get_me()
+            chat = await bot.get_chat(config.channel_id)
+            member = await bot.get_chat_member(config.channel_id, bot_info.id)
+            report = _build_check_report(
+                bot_username=bot_info.username or str(bot_info.id),
+                channel_name=str(chat.title or chat.id),
+                channel_status=str(member.status),
+                config=config,
+                repository=repository,
+                chat_id=callback.message.chat.id,
             )
+            pending = (
+                repository.pending_generation_artifact_count(callback.message.chat.id) > 0
+            )
+            await callback.answer("Проверка обновлена")
+            try:
+                await callback.message.edit_text(
+                    report,
+                    parse_mode="HTML",
+                    reply_markup=check_keyboard(has_pending_result=pending),
+                )
+            except Exception:
+                await callback.message.answer(
+                    report,
+                    parse_mode="HTML",
+                    reply_markup=check_keyboard(has_pending_result=pending),
+                )
+        except Exception as error:
+            logger.exception("Проверка настроек через меню не пройдена")
+            await callback.answer("Ошибка проверки", show_alert=True)
+            await callback.message.answer(f"Ошибка проверки: {error}")
 
     @router.message(Command("admins"))
     async def cmd_admins(message: Message) -> None:
@@ -2364,7 +2633,7 @@ def build_router(
 
     @router.message(Command("queue"))
     @router.message(F.text == "Запланированные")
-    @router.message(F.text == "Очередь")
+    @router.message(F.text.in_({"Очередь", "🕒 Очередь"}))
     async def queue(message: Message) -> None:
         if not await is_admin_message(message, config, repository):
             return
@@ -2752,8 +3021,8 @@ def build_router(
 
     @router.message(Command("model"))
     @router.message(Command("start_post"))
-    @router.message(F.text == "Создать пост")
-    @router.message(F.text == "Фото на модели")
+    @router.message(F.text.in_({"Создать пост", "📝 Создать пост"}))
+    @router.message(F.text.in_({"Фото на модели", "👕 Фото на модели"}))
     async def request_model_mockup(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config, repository):
             return
@@ -3221,6 +3490,7 @@ def build_router(
             preview_ref_id = data.get("model_preview_reference_id")
             preview_provider = data.get("model_preview_provider")
             if preview_ref_id and preview_provider == provider:
+                await state.set_state(DraftStates.generating_model_photos)
                 await state.update_data(
                     model_generation_mode=provider,
                     model_confirmed_reference_id=preview_ref_id,
@@ -3305,6 +3575,10 @@ def build_router(
         if not data.get("model_preview_reference_id"):
             await callback.answer("Референс предпросмотра не найден", show_alert=True)
             return
+        if await state.get_state() == DraftStates.generating_model_photos.state:
+            await callback.answer("Генерация уже запущена", show_alert=True)
+            return
+        await state.set_state(DraftStates.generating_model_photos)
         await state.update_data(
             model_generation_mode=provider,
             model_preview_provider=provider,
@@ -3489,6 +3763,55 @@ def build_router(
             "Генерация завершена.",
             reply_markup=main_keyboard(),
         )
+
+    @router.callback_query(F.data == "model:resend-pending")
+    async def resend_pending_model_result(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        if not await is_admin_callback(callback, config, repository):
+            return
+        if not callback.message:
+            await callback.answer()
+            return
+        artifact = repository.get_latest_pending_generation_artifact(
+            callback.message.chat.id
+        )
+        if not artifact:
+            await callback.answer("Готовых неотправленных файлов нет", show_alert=True)
+            return
+        await callback.answer("Отправляю сохраненный результат")
+        batch_id = f"restore{secrets.token_hex(3)}"
+        try:
+            sent = await callback.message.answer_photo(
+                photo=BufferedInputFile(
+                    bytes(artifact["image_bytes"]),
+                    filename=str(artifact["file_name"]),
+                ),
+                caption=str(artifact.get("caption") or "Готовый результат"),
+                reply_markup=model_photo_keyboard(batch_id, 0),
+            )
+        except Exception as error:
+            logger.exception(
+                "Повторная отправка результата не удалась artifact_id=%s",
+                artifact["id"],
+            )
+            repository.mark_generation_artifact_error(int(artifact["id"]), str(error))
+            await callback.message.answer(
+                "Telegram снова не принял файл. Результат сохранен в базе и не потерян. "
+                "Проверьте логи Render и повторите отправку позже.",
+                reply_markup=pending_result_keyboard(),
+            )
+            return
+        repository.delete_generation_artifact(int(artifact["id"]))
+        await state.update_data(
+            model_batch_id=batch_id,
+            model_generated_file_ids=[sent.photo[-1].file_id],
+        )
+        await save_model_draft(state, callback.message.chat.id)
+        await state.set_state(DraftStates.model_photos_ready)
+        repository.set_setting("last_mockup_status", "готово и отправлено")
+        repository.set_setting("last_mockup_error", "")
 
     @router.callback_query(F.data.startswith("model:post:"))
     async def post_from_model_photo(

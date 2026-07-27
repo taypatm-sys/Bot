@@ -23,5 +23,5 @@ def test_openai_provider_is_wired():
 def test_three_generation_modes_are_visible():
     handlers = (ROOT / "app" / "handlers.py").read_text(encoding="utf-8")
     assert "Простой - бесплатно" in handlers
-    assert 'text="Gemini"' in handlers
-    assert 'text="OpenAI"' in handlers
+    assert 'text="🔵 Gemini"' in handlers
+    assert 'text="🟣 OpenAI"' in handlers

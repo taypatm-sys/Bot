@@ -37,6 +37,10 @@ services:
         value: 1024x1536
       - key: OPENAI_IMAGE_QUALITY
         value: medium
+      - key: OPENAI_IMAGE_COST_USD
+        value: 0
+      - key: GEMINI_IMAGE_COST_USD
+        value: 0
       - key: MOCKUP_VARIANTS
         value: 1
       - key: REFERENCE_IMPORT_DELAY_SECONDS

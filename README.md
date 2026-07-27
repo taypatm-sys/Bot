@@ -546,10 +546,10 @@ ADMIN_TELEGRAM_IDS=987654321,555555555
 
 ## V6.2.1 - OpenAI timeout and visible error handling
 
-- Added a hard 4 minute timeout for OpenAI image generation.
+- Legacy note: the 4 minute outer timeout was removed in V6.2.4 because it could discard a paid result while the underlying request continued.
 - Added a 3 minute timeout for paid-reference preview selection.
 - OpenAI errors and preview failures are now sent to Telegram instead of leaving the interface on Loading.
-- OpenAI SDK now uses a finite timeout and one retry.
+- Legacy note: automatic OpenAI retries are disabled in V6.2.4 to prevent duplicate paid requests.
 - The status message now confirms when the request has actually been sent to OpenAI.
 
 ## V6.2.2 - OpenAI callback routing fix
@@ -557,3 +557,21 @@ ADMIN_TELEGRAM_IDS=987654321,555555555
 - Added `model:generate:openai` to the callback-query filter.
 - The OpenAI button is now handled instead of remaining on Telegram's loading indicator.
 - Added a regression test for the callback registration.
+
+
+## V6.2.4 - paid-result delivery recovery and Telegram UI audit
+
+- Removed `asyncio.wait_for()` around the background OpenAI request. Cancelling that wait did not stop the paid HTTP request and could discard a completed result.
+- Disabled automatic OpenAI SDK retries (`max_retries=0`) to prevent a second paid image request after a network timeout.
+- `gpt-image-1.5` requests use the supported portrait size `1024x1536`; the delivered JPEG is converted to `1024x1280` (4:5).
+- OpenAI output is requested as compressed JPEG and kept below Telegram `sendPhoto` limits.
+- Every completed image is temporarily stored in PostgreSQL/SQLite before Telegram delivery. If Telegram fails, use the `Отправить готовый результат` button without another OpenAI request.
+- OpenAI request ID, token usage and calculated image cost are recorded when the API response exposes usage.
+- `/check` and the Settings check screen now use compact monospaced tables.
+- Main, settings and generation buttons were regrouped and renamed for clearer navigation.
+
+### Cost reporting note
+
+For `gpt-image-1.5`, the bot uses token usage returned by OpenAI when available. If usage is absent, it shows the minimum output-image estimate for the configured quality and size. Image-edit input tokens can make the final dashboard charge higher than that minimum estimate. `OPENAI_IMAGE_COST_USD` can override the fallback estimate.
+
+Do not redeploy or restart Render while a paid image request is running. If a restart interrupts the process after OpenAI accepted the request, `/check` will mark it as interrupted and ask you to verify Usage instead of automatically charging for a second request.

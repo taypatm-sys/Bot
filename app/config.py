@@ -21,6 +21,8 @@ DEFAULT_GEMINI_IMAGE_SIZE = "1K"
 DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-1.5"
 DEFAULT_OPENAI_IMAGE_SIZE = "1024x1536"
 DEFAULT_OPENAI_IMAGE_QUALITY = "medium"
+DEFAULT_OPENAI_IMAGE_COST_USD = 0.0
+DEFAULT_GEMINI_IMAGE_COST_USD = 0.0
 DEFAULT_MOCKUP_VARIANTS = 1
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
@@ -83,6 +85,16 @@ def _positive_float(name: str, value: str, default: float) -> float:
         raise ConfigError(f"{name} должен быть числом") from error
     if result <= 0:
         raise ConfigError(f"{name} должен быть больше нуля")
+    return result
+
+
+def _nonnegative_float(name: str, value: str, default: float) -> float:
+    try:
+        result = float(value.strip() or str(default))
+    except ValueError as error:
+        raise ConfigError(f"{name} должен быть числом") from error
+    if result < 0:
+        raise ConfigError(f"{name} не может быть отрицательным")
     return result
 
 
@@ -152,7 +164,9 @@ class Config:
     openai_image_model: str = DEFAULT_OPENAI_IMAGE_MODEL
     openai_image_size: str = DEFAULT_OPENAI_IMAGE_SIZE
     openai_image_quality: str = DEFAULT_OPENAI_IMAGE_QUALITY
+    openai_image_cost_usd: float = DEFAULT_OPENAI_IMAGE_COST_USD
     gemini_image_size: str = DEFAULT_GEMINI_IMAGE_SIZE
+    gemini_image_cost_usd: float = DEFAULT_GEMINI_IMAGE_COST_USD
     mockup_variants: int = DEFAULT_MOCKUP_VARIANTS
     reference_sources_path: Path = BUNDLED_REFERENCE_SOURCES
     reference_import_delay_seconds: float = 5.0
@@ -227,6 +241,16 @@ class Config:
             openai_image_quality=(
                 os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_OPENAI_IMAGE_QUALITY).strip()
                 or DEFAULT_OPENAI_IMAGE_QUALITY
+            ),
+            openai_image_cost_usd=_nonnegative_float(
+                "OPENAI_IMAGE_COST_USD",
+                os.getenv("OPENAI_IMAGE_COST_USD", str(DEFAULT_OPENAI_IMAGE_COST_USD)),
+                DEFAULT_OPENAI_IMAGE_COST_USD,
+            ),
+            gemini_image_cost_usd=_nonnegative_float(
+                "GEMINI_IMAGE_COST_USD",
+                os.getenv("GEMINI_IMAGE_COST_USD", str(DEFAULT_GEMINI_IMAGE_COST_USD)),
+                DEFAULT_GEMINI_IMAGE_COST_USD,
             ),
             mockup_variants=_mockup_variants(
                 os.getenv("MOCKUP_VARIANTS", str(DEFAULT_MOCKUP_VARIANTS))
