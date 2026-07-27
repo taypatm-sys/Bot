@@ -7,9 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN python -m compileall -q bot.py app \
-    && python deploy_check.py \
-    && mkdir -p /app/data
+RUN mkdir -p /app/data
 
 CMD ["python", "bot.py"]
 

@@ -17,7 +17,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -63,7 +62,6 @@ from app.scheduling import (
 )
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
-from app.version import APP_VERSION
 
 
 UTC = timezone.utc
@@ -105,6 +103,8 @@ def _estimated_generation_cost_usd(provider: str, config: Config) -> float:
 
 
 def _openai_request_size(config: Config) -> str:
+    if config.openai_image_model == "gpt-image-2":
+        return config.openai_image_size
     if config.openai_image_size in {"1024x1024", "1024x1536", "1536x1024", "auto"}:
         return config.openai_image_size
     return "1024x1536"
@@ -138,8 +138,6 @@ def _check_table(sections: list[tuple[str, list[tuple[str, object]]]]) -> str:
         lines.append("-" * (label_width + value_width + 1))
         for label, raw_value in rows:
             value = str(raw_value if raw_value not in {None, ""} else "-")
-            if len(value) > 240:
-                value = value[:237] + "..."
             chunks = textwrap.wrap(
                 value,
                 width=value_width,
@@ -173,7 +171,6 @@ def _build_check_report(
             (
                 "Система",
                 [
-                    ("Версия", APP_VERSION),
                     ("Бот", f"@{bot_username}"),
                     ("Канал", channel_name),
                     ("Права", channel_status),
@@ -278,21 +275,13 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🖼 Референсы", callback_data="settings:references"),
             ],
             [
-                InlineKeyboardButton(text="👥 Админы", callback_data="settings:admins"),
+                InlineKeyboardButton(text="👥 Администраторы", callback_data="settings:admins"),
                 InlineKeyboardButton(text="🧾 Пресеты", callback_data="settings:presets"),
             ],
             [
                 InlineKeyboardButton(text="📝 Шаблон поста", callback_data="settings:template"),
             ],
             [InlineKeyboardButton(text="✖ Закрыть", callback_data="settings:close")],
-        ]
-    )
-
-
-def settings_back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад в настройки", callback_data="settings:back")]
         ]
     )
 
@@ -628,8 +617,7 @@ def format_model_analysis(
         f"🖨 PNG: {png_text}\n\n"
         "Выберите способ создания:\n"
         "• Простой — локально, бесплатно\n"
-        "• Gemini — платная генерация через Gemini\n"
-        "• OpenAI — платная генерация через OpenAI\n"
+        "• Сложный — через Gemini (платно)\n"
         "• PNG можно добавить при необходимости"
     )
 
@@ -843,16 +831,6 @@ def preset_choice_keyboard(presets: list[ProductPreset]) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def render_presets_text(presets: list[ProductPreset]) -> str:
-    if not presets:
-        return "Готовых пресетов пока нет."
-    lines = [
-        f"{index}. {item.name} | {item.size} | {item.price}"
-        for index, item in enumerate(presets, start=1)
-    ]
-    return "Готовые пресеты:\n\n" + "\n".join(lines)
-
-
 def preset_manager_keyboard(presets: list[ProductPreset]) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -865,9 +843,6 @@ def preset_manager_keyboard(presets: list[ProductPreset]) -> InlineKeyboardMarku
     ]
     rows.append(
         [InlineKeyboardButton(text="Добавить пресет", callback_data="preset:add")]
-    )
-    rows.append(
-        [InlineKeyboardButton(text="🔙 Назад в настройки", callback_data="settings:back")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1190,6 +1165,9 @@ def build_router(
         selected = None
         selected_compatibility = None
         selected_token = ""
+        best_candidate = None
+        best_compatibility = None
+        best_token = ""
         reject_reasons: list[str] = []
         for attempt in range(1, 7):
             token = f"preview:{message.chat.id}:{secrets.token_hex(5)}:{attempt}"
@@ -1243,16 +1221,31 @@ def build_router(
             if not compatibility.compatible:
                 excluded_ids.append(candidate.id)
                 reject_reasons.append(f"#{candidate.id}: {compatibility.reason}")
-                repository.release_reference_reservation(
-                    candidate.id,
-                    token,
-                    outcome="preview_rejected",
-                )
+                if best_candidate is None:
+                    best_candidate = candidate
+                    best_compatibility = compatibility
+                    best_token = token
+                else:
+                    repository.release_reference_reservation(
+                        candidate.id,
+                        token,
+                        outcome="preview_rejected",
+                    )
                 continue
             selected = candidate
             selected_compatibility = compatibility
             selected_token = token
             break
+
+        if selected is None and best_candidate is not None:
+            selected = best_candidate
+            selected_compatibility = best_compatibility.model_copy(
+                update={
+                    "compatible": True,
+                    "reason": f"Использован референс #{best_candidate.id} (предупреждение: {best_compatibility.reason})",
+                }
+            )
+            selected_token = best_token
 
         if selected is None or selected_compatibility is None:
             if reject_reasons:
@@ -1287,51 +1280,24 @@ def build_router(
         )
         await save_model_draft(state, message.chat.id)
         await state.set_state(DraftStates.gemini_preview)
-        try:
-            await waiting.delete()
-        except Exception:
-            logger.debug("Не удалось удалить сообщение ожидания предпросмотра", exc_info=True)
+        await waiting.delete()
         side_label = "спереди" if spec.side == "front" else "сзади"
-        try:
-            await message.answer_photo(
-                photo=BufferedInputFile(
-                    selected.thumbnail_bytes or selected.image_bytes,
-                    filename=f"reference-{selected.id}.jpg",
-                ),
-                caption=(
-                    f"Референс #{selected.id} выбран для {provider_label}\n\n"
-                    f"Совместимость: {score}/100\n"
-                    f"Почему выбран: {reasons[:700]}\n\n"
-                    f"Сторона: {side_label}\n"
-                    f"Цвет товара: {spec.shirt_color}\n"
-                    "Платная генерация еще не запускалась.\n"
-                    "👇 Выберите режим ниже для запуска:"
-                ),
-                reply_markup=paid_preview_keyboard(provider),
-            )
-        except Exception as error:
-            logger.exception("Telegram не смог отправить предпросмотр референса #%s", selected.id)
-            repository.release_reference_reservation(
-                selected.id,
-                selected_token,
-                outcome="preview_delivery_failed",
-            )
-            await state.update_data(
-                model_preview_provider=None,
-                model_preview_reference_id=None,
-                model_preview_usage_token=None,
-                model_preview_direction=None,
-                model_preview_compatibility=None,
-            )
-            await save_model_draft(state, message.chat.id)
-            await state.set_state(DraftStates.model_analysis_ready)
-            await message.answer(
-                "Не удалось отправить предпросмотр референса в Telegram. "
-                "Резервирование отменено, платная генерация не запускалась. "
-                f"Ошибка: {error}",
-                reply_markup=model_analysis_keyboard(has_print=bool(data.get("model_print_file_id"))),
-            )
-            return False
+        await message.answer_photo(
+            photo=BufferedInputFile(
+                selected.thumbnail_bytes or selected.image_bytes,
+                filename=f"reference-{selected.id}.jpg",
+            ),
+            caption=(
+                f"Референс #{selected.id} выбран для {provider_label}\n\n"
+                f"Совместимость: {score}/100\n"
+                f"Почему выбран: {reasons[:700]}\n\n"
+                f"Сторона: {side_label}\n"
+                f"Цвет товара: {spec.shirt_color}\n"
+                "Платная генерация еще не запускалась.\n"
+                "👇 Выберите режим ниже для запуска:"
+            ),
+            reply_markup=paid_preview_keyboard(provider),
+        )
         return True
 
     async def send_reference_card(
@@ -1442,29 +1408,12 @@ def build_router(
             )
             return
         async with lock:
-            try:
-                await _generate_model_batch_impl(
-                    message=message,
-                    state=state,
-                    bot=bot,
-                    status_message=status_message,
-                )
-            except Exception as error:
-                logger.exception("Необработанная ошибка генерации фото на модели")
-                repository.set_setting("last_mockup_status", "внутренняя ошибка")
-                repository.set_setting("last_mockup_error", str(error)[:1000])
-                await state.set_state(DraftStates.model_analysis_ready)
-                try:
-                    await status_message.edit_text(
-                        "Генерация остановлена из-за внутренней ошибки. "
-                        "Платный запрос повторно автоматически не запускается.\n\n"
-                        f"Ошибка: {type(error).__name__}: {error}",
-                        reply_markup=model_analysis_keyboard(
-                            has_print=bool((await state.get_data()).get("model_print_file_id"))
-                        ),
-                    )
-                except Exception:
-                    logger.exception("Не удалось показать пользователю ошибку генерации")
+            await _generate_model_batch_impl(
+                message=message,
+                state=state,
+                bot=bot,
+                status_message=status_message,
+            )
 
     async def _generate_model_batch_impl(
         *,
@@ -1723,30 +1672,29 @@ def build_router(
                     )
 
                 if not compatibility.compatible:
-                    excluded_reference_ids.append(candidate.id)
-                    reference_replacements += 1
-                    repository.set_setting(
-                        "last_mockup_reference_replacements",
-                        str(reference_replacements),
-                    )
-                    preflight_reasons.append(
-                        f"#{candidate.id}: {compatibility.reason}"
-                    )
-                    repository.release_reference_reservation(
-                        candidate.id,
-                        candidate_token,
-                        outcome=(
-                            "confirmed_rejected_preflight"
-                            if use_confirmed
-                            else "rejected_preflight"
-                        ),
-                    )
-                    logger.info(
-                        "Референс #%s отклонен до генерации: %s",
-                        candidate.id,
-                        compatibility.reason,
-                    )
-                    continue
+                    if use_confirmed:
+                        compatibility = compatibility.model_copy(update={"compatible": True})
+                    else:
+                        excluded_reference_ids.append(candidate.id)
+                        reference_replacements += 1
+                        repository.set_setting(
+                            "last_mockup_reference_replacements",
+                            str(reference_replacements),
+                        )
+                        preflight_reasons.append(
+                            f"#{candidate.id}: {compatibility.reason}"
+                        )
+                        repository.release_reference_reservation(
+                            candidate.id,
+                            candidate_token,
+                            outcome="rejected_preflight",
+                        )
+                        logger.info(
+                            "Референс #%s отклонен до генерации: %s",
+                            candidate.id,
+                            compatibility.reason,
+                        )
+                        continue
 
                 if (
                     requested_generation_mode == "local"
@@ -2055,10 +2003,9 @@ def build_router(
                 corrected_total = max(0.0, previous_total - estimated_cost_usd + final_cost_usd)
                 repository.set_setting("last_generation_cost_usd", f"{final_cost_usd:.6f}")
                 repository.set_setting("total_generation_cost_usd", f"{corrected_total:.6f}")
-            if generation_decision.provider == "openai":
-                repository.set_setting(
-                    "last_openai_request_id", generated_photo.provider_request_id or ""
-                )
+            repository.set_setting(
+                "last_openai_request_id", generated_photo.provider_request_id or ""
+            )
             repository.set_setting(
                 "last_generation_cost_source", generated_photo.cost_source or "estimate"
             )
@@ -2243,11 +2190,18 @@ def build_router(
         if not await is_admin_callback(callback, config, repository):
             return
         presets = repository.list_presets()
+        if presets:
+            lines = [
+                f"{index}. {item.name} | {item.size} | {item.price}"
+                for index, item in enumerate(presets, start=1)
+            ]
+            text_value = "Готовые пресеты:\n\n" + "\n".join(lines)
+        else:
+            text_value = "Готовых пресетов пока нет."
         await callback.answer()
         if callback.message:
-            await callback.message.edit_text(
-                render_presets_text(presets),
-                reply_markup=preset_manager_keyboard(presets),
+            await callback.message.answer(
+                text_value, reply_markup=preset_manager_keyboard(presets)
             )
 
     @router.callback_query(F.data == "settings:template")
@@ -2256,11 +2210,10 @@ def build_router(
             return
         await callback.answer()
         if callback.message:
-            await callback.message.edit_text(
+            await callback.message.answer(
                 "Текущий шаблон:\n\n"
                 f"{template_store.get()}\n\n"
-                "Изменить: /settemplate",
-                reply_markup=settings_back_keyboard(),
+                "Изменить: /settemplate"
             )
 
     @router.callback_query(F.data == "settings:references")
@@ -2270,38 +2223,23 @@ def build_router(
         await callback.answer("Открываю референсы")
         if not callback.message:
             return
-        waiting_message = callback.message
         try:
-            if callback.message.text is not None:
-                await callback.message.edit_text("Загружаю каталог референсов...")
-            else:
-                waiting_message = await callback.message.answer(
-                    "Загружаю каталог референсов..."
-                )
+            await callback.message.edit_text("Загружаю каталог референсов...")
             status = await asyncio.wait_for(
                 asyncio.to_thread(reference_catalog.status_text),
                 timeout=20.0,
             )
-            await waiting_message.edit_text(
+            await callback.message.edit_text(
                 status,
                 reply_markup=references_keyboard(),
             )
         except Exception as error:
             logger.exception("Кнопка референсов завершилась ошибкой")
-            error_text = (
+            await callback.message.edit_text(
                 "Не удалось открыть каталог референсов.\n\n"
-                f"Ошибка: {error}"
+                f"Ошибка: {error}",
+                reply_markup=settings_keyboard(),
             )
-            try:
-                await waiting_message.edit_text(
-                    error_text,
-                    reply_markup=settings_keyboard(),
-                )
-            except Exception:
-                await callback.message.answer(
-                    error_text,
-                    reply_markup=settings_keyboard(),
-                )
 
     @router.callback_query(F.data == "settings:check")
     async def settings_check(callback: CallbackQuery, bot: Bot) -> None:
@@ -2351,7 +2289,6 @@ def build_router(
             return
         await message.answer(
             render_admins_text(config, repository),
-            parse_mode="HTML",
             reply_markup=admins_keyboard(config, repository),
         )
 
@@ -2362,7 +2299,6 @@ def build_router(
         if callback.message:
             await callback.message.edit_text(
                 render_admins_text(config, repository),
-                parse_mode="HTML",
                 reply_markup=admins_keyboard(config, repository),
             )
         await callback.answer()
@@ -2372,16 +2308,10 @@ def build_router(
         if not await is_admin_callback(callback, config, repository):
             return
         if callback.message:
-            if callback.message.text is not None:
-                await callback.message.edit_text(
-                    "Раздел настроек и служебных функций бота:",
-                    reply_markup=settings_keyboard(),
-                )
-            else:
-                await callback.message.answer(
-                    "Раздел настроек и служебных функций бота:",
-                    reply_markup=settings_keyboard(),
-                )
+            await callback.message.edit_text(
+                "Раздел настроек и служебных функций бота:",
+                reply_markup=settings_keyboard(),
+            )
         await callback.answer()
 
     @router.callback_query(F.data == "admins:add")
@@ -2394,7 +2324,6 @@ def build_router(
                 "➕ <b>Добавление нового администратора</b>\n\n"
                 "Введите цифровой <b>Telegram ID</b> пользователя (например, <code>726543210</code>):\n\n"
                 "<i>Узнать свой ID пользователь может через бота @userinfobot</i>",
-                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="settings:admins")]]
                 ),
@@ -2417,7 +2346,6 @@ def build_router(
             await state.clear()
             await message.answer(
                 f"⚠️ Пользователь с ID <code>{new_admin_id}</code> уже является администратором.",
-                parse_mode="HTML",
                 reply_markup=main_keyboard(),
             )
             return
@@ -2425,12 +2353,10 @@ def build_router(
             await state.clear()
             await message.answer(
                 f"✅ Администратор с ID <code>{new_admin_id}</code> успешно добавлен!",
-                parse_mode="HTML",
                 reply_markup=main_keyboard(),
             )
             await message.answer(
                 render_admins_text(config, repository),
-                parse_mode="HTML",
                 reply_markup=admins_keyboard(config, repository),
             )
         else:
@@ -2456,7 +2382,6 @@ def build_router(
             if callback.message:
                 await callback.message.edit_text(
                     render_admins_text(config, repository),
-                    parse_mode="HTML",
                     reply_markup=admins_keyboard(config, repository),
                 )
         else:
@@ -2516,22 +2441,10 @@ def build_router(
         else:
             await callback.answer("Нет ожидающих или зависших задач")
         if callback.message:
-            try:
-                status = await asyncio.wait_for(
-                    asyncio.to_thread(reference_catalog.status_text),
-                    timeout=20.0,
-                )
-                await callback.message.edit_text(
-                    status,
-                    reply_markup=references_keyboard(),
-                )
-            except Exception as error:
-                logger.exception("Не удалось обновить статус после продолжения обработки")
-                await callback.message.edit_text(
-                    "Обработка продолжена, но статус пока не загрузился.\n\n"
-                    f"Ошибка: {error}",
-                    reply_markup=references_keyboard(),
-                )
+            await callback.message.edit_text(
+                reference_catalog.status_text(),
+                reply_markup=references_keyboard(),
+            )
 
     @router.callback_query(F.data == "references:noop")
     async def references_noop(callback: CallbackQuery) -> None:
@@ -2549,41 +2462,6 @@ def build_router(
         except (ValueError, IndexError):
             offset = 0
         await callback.answer()
-        if callback.message.photo:
-            total = repository.reference_stats().get("total", 0)
-            if total <= 0:
-                await callback.message.answer(
-                    "База референсов пуста.",
-                    reply_markup=references_keyboard(),
-                )
-                return
-            offset = max(0, min(offset, total - 1))
-            assets = repository.list_reference_assets(limit=1, offset=offset)
-            if not assets:
-                await callback.message.answer("Референс не найден.")
-                return
-            asset = assets[0]
-            photo_bytes = (
-                asset.simple_thumbnail_bytes
-                or asset.thumbnail_bytes
-                or asset.simple_image_bytes
-                or asset.image_bytes
-            )
-            if photo_bytes:
-                try:
-                    await callback.message.edit_media(
-                        media=InputMediaPhoto(
-                            media=BufferedInputFile(
-                                photo_bytes,
-                                filename=f"reference-{asset.id}.jpg",
-                            ),
-                            caption=reference_card_text(asset),
-                        ),
-                        reply_markup=reference_card_keyboard(asset.id, offset, total),
-                    )
-                    return
-                except Exception:
-                    logger.exception("Не удалось обновить карточку референса в текущем сообщении")
         await send_reference_card(callback.message, offset=offset)
 
     @router.callback_query(F.data == "references:prepare-all")
@@ -3142,10 +3020,15 @@ def build_router(
         if not await is_admin_message(message, config, repository):
             return
         presets = repository.list_presets()
-        await message.answer(
-            render_presets_text(presets),
-            reply_markup=preset_manager_keyboard(presets),
-        )
+        if presets:
+            lines = [
+                f"{index}. {item.name} | {item.size} | {item.price}"
+                for index, item in enumerate(presets, start=1)
+            ]
+            text = "Готовые пресеты:\n\n" + "\n".join(lines)
+        else:
+            text = "Готовых пресетов пока нет."
+        await message.answer(text, reply_markup=preset_manager_keyboard(presets))
 
     @router.callback_query(F.data == "preset:add")
     async def add_preset(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3189,11 +3072,7 @@ def build_router(
             await message.answer(str(error))
             return
         await state.clear()
-        presets = repository.list_presets()
-        await message.answer(
-            "Пресет добавлен.\n\n" + render_presets_text(presets),
-            reply_markup=preset_manager_keyboard(presets),
-        )
+        await message.answer("Пресет добавлен.", reply_markup=main_keyboard())
 
     @router.callback_query(F.data.startswith("preset:delete:"))
     async def delete_preset(callback: CallbackQuery) -> None:
@@ -3204,24 +3083,13 @@ def build_router(
         await callback.answer("Пресет удален" if deleted else "Пресет уже удален")
         if callback.message and deleted:
             presets = repository.list_presets()
-            await callback.message.edit_text(
-                render_presets_text(presets),
-                reply_markup=preset_manager_keyboard(presets),
+            await callback.message.edit_reply_markup(
+                reply_markup=preset_manager_keyboard(presets)
             )
 
+    @router.message(Command("model"))
     @router.message(Command("start_post"))
     @router.message(F.text.in_({"Создать пост", "📝 Создать пост"}))
-    async def request_post_photo(message: Message, state: FSMContext) -> None:
-        if not await is_admin_message(message, config, repository):
-            return
-        await state.clear()
-        repository.clear_active_draft(message.chat.id)
-        await message.answer(
-            "Отправьте готовую фотографию товара.\n"
-            "Бот подготовит название, описание, цену, размеры и время публикации."
-        )
-
-    @router.message(Command("model"))
     @router.message(F.text.in_({"Фото на модели", "👕 Фото на модели"}))
     async def request_model_mockup(message: Message, state: FSMContext) -> None:
         if not await is_admin_message(message, config, repository):
@@ -3232,7 +3100,7 @@ def build_router(
         await state.set_state(DraftStates.waiting_model_mockup)
         await message.answer(
             "Отправьте фото вещи с макетом принта.\n"
-            "Бот подберет подходящую модель и создаст фотографию 4:5."
+            "Бот подберет подходящую модель и сгенерирует финальный пост."
         )
 
     async def accept_model_mockup(
@@ -3683,7 +3551,7 @@ def build_router(
             provider_label = "OpenAI" if provider == "openai" else "Gemini"
             if provider == "openai" and not config.openai_api_key:
                 await callback.answer(
-                    "OPENAI_API_KEY не добавлен в переменные сервера",
+                    "OPENAI_API_KEY не добавлен в Render",
                     show_alert=True,
                 )
                 return
@@ -3999,7 +3867,7 @@ def build_router(
             repository.mark_generation_artifact_error(int(artifact["id"]), str(error))
             await callback.message.answer(
                 "Telegram снова не принял файл. Результат сохранен в базе и не потерян. "
-                "Проверьте логи сервера и повторите отправку позже.",
+                "Проверьте логи Render и повторите отправку позже.",
                 reply_markup=pending_result_keyboard(),
             )
             return

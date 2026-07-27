@@ -62,17 +62,11 @@ class SingleInstanceGuard:
             return acquired
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "SingleInstanceGuard: PostgreSQL недоступен (%s). "
-                "Файловый замок не используется, чтобы не запустить второй polling на другом сервере.",
+                "⚠️ SingleInstanceGuard: ошибка PostgreSQL (%s). Использован файловый замок.",
                 error,
             )
-            if self._connection is not None:
-                try:
-                    self._connection.close()
-                except Exception:
-                    pass
-                self._connection = None
-            return False
+            self.database_url = ""
+            return self._try_file()
 
     def _try_file(self) -> bool:
         self._file_path.parent.mkdir(parents=True, exist_ok=True)

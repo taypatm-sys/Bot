@@ -61,8 +61,6 @@ services:
         value: ru
       - key: DATABASE_URL
         sync: false
-      - key: ALLOW_SQLITE_FALLBACK
-        value: false
       - key: DATABASE_PATH
         value: data/posts.sqlite3
       - key: CAPTION_TEMPLATE_PATH

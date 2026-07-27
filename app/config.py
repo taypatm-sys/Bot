@@ -47,33 +47,6 @@ def normalize_gemini_image_size(value: str) -> str:
     return image_size
 
 
-def normalize_openai_image_size(value: str) -> str:
-    image_size = value.strip().casefold() or DEFAULT_OPENAI_IMAGE_SIZE
-    # Older bot versions suggested 1024x1280. The API does not accept it,
-    # so preserve backward compatibility by requesting portrait and cropping
-    # locally to exact 4:5.
-    if image_size == "1024x1280":
-        image_size = "1024x1536"
-    allowed = {"1024x1024", "1024x1536", "1536x1024", "auto"}
-    if image_size not in allowed:
-        raise ConfigError(
-            "OPENAI_IMAGE_SIZE должен быть 1024x1024, 1024x1536, "
-            "1536x1024 или auto"
-        )
-    return image_size
-
-
-def normalize_openai_image_quality(value: str) -> str:
-    quality = value.strip().casefold() or DEFAULT_OPENAI_IMAGE_QUALITY
-    if quality == "standard":
-        quality = "medium"
-    if quality not in {"low", "medium", "high", "auto"}:
-        raise ConfigError(
-            "OPENAI_IMAGE_QUALITY должен быть low, medium, high или auto"
-        )
-    return quality
-
-
 def _mockup_variants(value: str) -> int:
     try:
         variants = int(value)
@@ -186,7 +159,6 @@ class Config:
     database_path: Path
     caption_template_path: Path
     database_url: str = ""
-    allow_sqlite_fallback: bool = False
     admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
     openai_image_model: str = DEFAULT_OPENAI_IMAGE_MODEL
@@ -250,11 +222,6 @@ class Config:
                 os.getenv("CAPTION_TEMPLATE_PATH", "caption_template.txt")
             ),
             database_url=database_url,
-            allow_sqlite_fallback=_bool_env(
-                "ALLOW_SQLITE_FALLBACK",
-                os.getenv("ALLOW_SQLITE_FALLBACK", "false"),
-                default=False,
-            ),
             admin_telegram_ids=admin_ids,
             gemini_image_model=(
                 os.getenv("GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL).strip()
@@ -267,11 +234,13 @@ class Config:
                 os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_OPENAI_IMAGE_MODEL).strip()
                 or DEFAULT_OPENAI_IMAGE_MODEL
             ),
-            openai_image_size=normalize_openai_image_size(
-                os.getenv("OPENAI_IMAGE_SIZE", DEFAULT_OPENAI_IMAGE_SIZE)
+            openai_image_size=(
+                os.getenv("OPENAI_IMAGE_SIZE", DEFAULT_OPENAI_IMAGE_SIZE).strip()
+                or DEFAULT_OPENAI_IMAGE_SIZE
             ),
-            openai_image_quality=normalize_openai_image_quality(
-                os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_OPENAI_IMAGE_QUALITY)
+            openai_image_quality=(
+                os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_OPENAI_IMAGE_QUALITY).strip()
+                or DEFAULT_OPENAI_IMAGE_QUALITY
             ),
             openai_image_cost_usd=_nonnegative_float(
                 "OPENAI_IMAGE_COST_USD",
@@ -327,7 +296,7 @@ class Config:
             pinterest_search_enabled=_bool_env(
                 "PINTEREST_SEARCH_ENABLED",
                 os.getenv("PINTEREST_SEARCH_ENABLED", "false"),
-                default=False,
+                default=True,
             ),
             pinterest_country_code=(
                 os.getenv("PINTEREST_COUNTRY_CODE", "US").strip().upper() or "US"

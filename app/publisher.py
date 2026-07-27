@@ -30,11 +30,6 @@ class Publisher:
         self.template_store = template_store
         self.max_attempts = 5
 
-    def admin_ids(self) -> list[int]:
-        return sorted(
-            set(self.config.admin_ids).union(self.repository.list_extra_admin_ids())
-        )
-
     def public_keyboard(self, title: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -72,7 +67,7 @@ class Publisher:
                 reply_markup=self.public_keyboard(post.title),
             )
             self.repository.mark_published(post_id, message.message_id)
-            for admin_id in self.admin_ids():
+            for admin_id in self.config.admin_ids:
                 try:
                     await self.bot.send_message(
                         chat_id=admin_id,
@@ -94,14 +89,14 @@ class Publisher:
             )
             logger.exception("Не удалось опубликовать пост %s", post_id)
             if status == "failed":
-                for admin_id in self.admin_ids():
+                for admin_id in self.config.admin_ids:
                     try:
                         await self.bot.send_message(
                             chat_id=admin_id,
                             text=(
                                 f"Пост #{post_id} не опубликован после "
                                 f"{self.max_attempts} попыток. Проверьте права "
-                                "бота в канале и настройки сервера."
+                                "бота в канале и настройки Render."
                             ),
                         )
                     except Exception:
