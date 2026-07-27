@@ -3168,7 +3168,7 @@ def build_router(
         )
 
     @router.callback_query(
-        F.data.in_({"model:generate", "model:generate:local", "model:generate:gemini"})
+        F.data.in_({"model:generate", "model:generate:local", "model:generate:gemini", "model:generate:openai"})
     )
     async def confirm_model_generation(
         callback: CallbackQuery,

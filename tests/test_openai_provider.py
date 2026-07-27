@@ -12,6 +12,10 @@ def test_openai_provider_is_wired():
 
     assert "OPENAI_API_KEY" in config
     assert "model:generate:openai" in handlers
+    assert (
+        'F.data.in_({"model:generate", "model:generate:local", "model:generate:gemini", "model:generate:openai"})'
+        in handlers
+    )
     assert "OpenAIMockupGenerator" in bot
     assert "openai>=" in requirements
 

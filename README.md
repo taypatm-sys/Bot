@@ -551,3 +551,9 @@ ADMIN_TELEGRAM_IDS=987654321,555555555
 - OpenAI errors and preview failures are now sent to Telegram instead of leaving the interface on Loading.
 - OpenAI SDK now uses a finite timeout and one retry.
 - The status message now confirms when the request has actually been sent to OpenAI.
+
+## V6.2.2 - OpenAI callback routing fix
+
+- Added `model:generate:openai` to the callback-query filter.
+- The OpenAI button is now handled instead of remaining on Telegram's loading indicator.
+- Added a regression test for the callback registration.
