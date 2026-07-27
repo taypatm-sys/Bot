@@ -46,7 +46,7 @@ class OpenAIMockupGenerator:
                 "OpenAI API не настроен. Добавьте OPENAI_API_KEY в Render и выполните redeploy."
             )
         if self._client is None:
-            self._client = OpenAI(api_key=self.api_key)
+            self._client = OpenAI(api_key=self.api_key, timeout=180.0, max_retries=1)
         return self._client
 
     @staticmethod
@@ -71,8 +71,9 @@ class OpenAIMockupGenerator:
         image_model: Optional[str] = None,
     ) -> GeneratedModelPhoto:
         try:
-            return await asyncio.to_thread(
-                self._generate_sync,
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generate_sync,
                 image_bytes,
                 mime_type,
                 spec,
@@ -83,8 +84,15 @@ class OpenAIMockupGenerator:
                 reference_image_bytes,
                 reference_mime_type,
                 reference_tags,
-                image_model,
+                    image_model,
+                ),
+                timeout=240.0,
             )
+        except asyncio.TimeoutError as error:
+            logger.error("OpenAI generation timed out after 240 seconds")
+            raise MockupGenerationError(
+                "OpenAI не ответил за 4 минуты. Запрос остановлен. Проверьте логи Render, баланс и доступ к модели."
+            ) from error
         except MockupGenerationError:
             raise
         except Exception as error:

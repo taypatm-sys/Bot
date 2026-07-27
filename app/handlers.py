@@ -1689,6 +1689,9 @@ def build_router(
                             image_model=generation_decision.model,
                         )
                 elif generation_decision.provider == "openai":
+                    await status_message.edit_text(
+                        "Запрос передан OpenAI. Генерация изображения может занять несколько минут."
+                    )
                     generated_photo = await openai_generator.generate_variant(
                         **generator_kwargs,
                         image_model=generation_decision.model,
@@ -3243,12 +3246,27 @@ def build_router(
             await state.update_data(model_generation_mode=provider)
             await save_model_draft(state, callback.message.chat.id)
             await callback.answer("Подбираю референс")
-            await prepare_paid_preview(
-                message=callback.message,
-                state=state,
-                provider=provider,
-                replace_current=False,
-            )
+            try:
+                await asyncio.wait_for(
+                    prepare_paid_preview(
+                        message=callback.message,
+                        state=state,
+                        provider=provider,
+                        replace_current=False,
+                    ),
+                    timeout=180.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Предпросмотр %s превысил 180 секунд", provider_label)
+                await callback.message.answer(
+                    f"Подбор референса для {provider_label} занял больше 3 минут и был остановлен. "
+                    "Повторите попытку или выберите другой режим."
+                )
+            except Exception as error:
+                logger.exception("Ошибка подготовки предпросмотра %s", provider_label)
+                await callback.message.answer(
+                    f"Не удалось подготовить запуск через {provider_label}: {error}"
+                )
             return
         else:
             generation_mode = "auto"
