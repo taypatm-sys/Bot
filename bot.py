@@ -42,7 +42,7 @@ async def main() -> None:
         await bot.session.close()
         raise
     guard = SingleInstanceGuard(
-        database_url=config.database_url,
+        database_url=repository.database_url,
         bot_token=config.telegram_bot_token,
     )
     repository.recover_interrupted_posts()

@@ -1414,6 +1414,22 @@ class HandlersUXTests(unittest.TestCase):
         self.assertIn("👕 Изделие: футболка", output)
         self.assertIn("↔️ Сторона: спереди", output)
 
+    def test_postgres_fallback_to_sqlite(self) -> None:
+        from unittest.mock import patch
+        import psycopg
+
+        repository = PostRepository("postgresql://user:pass@invalid_domain/dbname")
+        repository.path = Path(tempfile.gettempdir()) / "fallback_test.sqlite3"
+        try:
+            with patch("psycopg_pool.ConnectionPool.open", side_effect=psycopg.OperationalError("quota exceeded")):
+                repository.initialize()
+            self.assertTrue(repository._was_fallback)
+            self.assertIn("резерв", repository.backend_name)
+            self.assertFalse(repository.is_persistent)
+        finally:
+            if repository.path and repository.path.exists():
+                repository.path.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -140,7 +140,7 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
 
 
 class PostRepository:
-    """Queue storage with PostgreSQL support and a local SQLite fallback."""
+    """Queue storage with PostgreSQL support and an automatic local SQLite fallback."""
 
     def __init__(self, source: DatabaseSource):
         source_text = str(source)
@@ -149,14 +149,36 @@ class PostRepository:
         )
         self.path = None if self.database_url else Path(source)
         self._pool: Any = None
+        self._was_fallback: bool = False
 
     @property
     def backend_name(self) -> str:
+        if self._was_fallback:
+            return "SQLite (автоматический резерв при ошибке PostgreSQL)"
         return "PostgreSQL" if self.database_url else "SQLite"
 
     @property
     def is_persistent(self) -> bool:
         return bool(self.database_url)
+
+    def _fallback_to_sqlite(self, reason: str) -> None:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "⚠️ ВНИМАНИЕ: Ошибка подключения к PostgreSQL (%s). "
+            "Переключаюсь на локальную базу SQLite для бесперебойной работы!",
+            reason,
+        )
+        if self._pool is not None:
+            try:
+                self._pool.close()
+            except Exception:
+                pass
+            self._pool = None
+        self.database_url = ""
+        self._was_fallback = True
+        if self.path is None:
+            self.path = Path("posts.sqlite3")
 
     def _ensure_pool(self) -> None:
         if not self.database_url or self._pool is not None:
@@ -169,24 +191,40 @@ class PostRepository:
                 "Для DATABASE_URL установите зависимости из requirements.txt"
             ) from error
 
-        self._pool = ConnectionPool(
-            conninfo=self.database_url,
-            min_size=0,
-            max_size=3,
-            open=False,
-            kwargs={"row_factory": dict_row, "prepare_threshold": None},
-            check=ConnectionPool.check_connection,
-        )
-        self._pool.open(wait=True, timeout=30)
+        pool = None
+        try:
+            pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=0,
+                max_size=3,
+                open=False,
+                kwargs={"row_factory": dict_row, "prepare_threshold": None},
+                check=ConnectionPool.check_connection,
+            )
+            pool.open(wait=True, timeout=10)
+            self._pool = pool
+        except Exception as error:
+            if pool is not None:
+                try:
+                    pool.close()
+                except Exception:
+                    pass
+            self._fallback_to_sqlite(str(error))
 
     @contextmanager
     def _connect(self) -> Iterator[Any]:
         if self.database_url:
-            self._ensure_pool()
-            with self._pool.connection() as connection:
-                yield connection
-            return
+            try:
+                self._ensure_pool()
+                if self._pool is not None:
+                    with self._pool.connection(timeout=10) as connection:
+                        yield connection
+                    return
+            except Exception as error:
+                self._fallback_to_sqlite(str(error))
 
+        if self.path is None:
+            self.path = Path("posts.sqlite3")
         connection = sqlite3.connect(self.path, timeout=10)
         try:
             connection.row_factory = sqlite3.Row
@@ -207,6 +245,12 @@ class PostRepository:
         return connection.execute(self._sql(query), tuple(params))
 
     def initialize(self) -> None:
+        if self.database_url:
+            try:
+                self._ensure_pool()
+            except Exception as error:
+                self._fallback_to_sqlite(str(error))
+
         id_column = (
             "BIGSERIAL PRIMARY KEY"
             if self.database_url

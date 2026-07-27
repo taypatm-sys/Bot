@@ -44,18 +44,29 @@ class SingleInstanceGuard:
         return self._try_file()
 
     def _try_postgres(self) -> bool:
+        import logging
         import psycopg
 
-        if self._connection is None or self._connection.closed:
-            self._connection = psycopg.connect(self.database_url, autocommit=True)
-        with self._connection.cursor() as cursor:
-            cursor.execute("SELECT pg_try_advisory_lock(%s)", (self.lock_key,))
-            row = cursor.fetchone()
-        acquired = bool(row and row[0])
-        if not acquired:
-            self._connection.close()
-            self._connection = None
-        return acquired
+        try:
+            if self._connection is None or self._connection.closed:
+                self._connection = psycopg.connect(
+                    self.database_url, autocommit=True, connect_timeout=10
+                )
+            with self._connection.cursor() as cursor:
+                cursor.execute("SELECT pg_try_advisory_lock(%s)", (self.lock_key,))
+                row = cursor.fetchone()
+            acquired = bool(row and row[0])
+            if not acquired:
+                self._connection.close()
+                self._connection = None
+            return acquired
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "⚠️ SingleInstanceGuard: ошибка PostgreSQL (%s). Использован файловый замок.",
+                error,
+            )
+            self.database_url = ""
+            return self._try_file()
 
     def _try_file(self) -> bool:
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
