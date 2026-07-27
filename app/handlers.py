@@ -6,6 +6,7 @@ import secrets
 import textwrap
 from dataclasses import asdict
 from datetime import datetime, timezone
+from typing import Optional
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart

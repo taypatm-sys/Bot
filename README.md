@@ -575,3 +575,8 @@ ADMIN_TELEGRAM_IDS=987654321,555555555
 For `gpt-image-1.5`, the bot uses token usage returned by OpenAI when available. If usage is absent, it shows the minimum output-image estimate for the configured quality and size. Image-edit input tokens can make the final dashboard charge higher than that minimum estimate. `OPENAI_IMAGE_COST_USD` can override the fallback estimate.
 
 Do not redeploy or restart Render while a paid image request is running. If a restart interrupts the process after OpenAI accepted the request, `/check` will mark it as interrupted and ask you to verify Usage instead of automatically charging for a second request.
+
+## V6.2.5 - Railway startup import fix
+- Added the missing `Optional` import in `app/handlers.py`.
+- Fixes the startup crash: `NameError: name 'Optional' is not defined`.
+- Verified all Python files compile successfully.
