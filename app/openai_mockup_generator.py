@@ -155,7 +155,7 @@ class OpenAIMockupGenerator:
     def _get_client(self) -> OpenAI:
         if not self.api_key:
             raise MockupGenerationError(
-                "OpenAI API не настроен. Добавьте OPENAI_API_KEY в Render и выполните redeploy."
+                "OpenAI API не настроен. Добавьте OPENAI_API_KEY в переменные сервера и выполните redeploy."
             )
         if self._client is None:
             # Automatic SDK retries can create a second paid image request after a
@@ -426,6 +426,6 @@ class OpenAIMockupGenerator:
                 + suffix
             )
         return MockupGenerationError(
-            "OpenAI не смог завершить передачу результата. Проверьте логи Render и Usage."
+            "OpenAI не смог завершить передачу результата. Проверьте логи сервера и Usage."
             + suffix
         )

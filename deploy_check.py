@@ -16,7 +16,10 @@ REQUIRED_FILES = (
     "app/models.py",
     "app/mockup_generator.py",
     "app/local_mockup_generator.py",
+    "app/openai_mockup_generator.py",
+    "app/image_delivery.py",
     "app/generation_router.py",
+    "app/version.py",
     "app/publisher.py",
     "app/reference_catalog.py",
     "app/scheduling.py",
@@ -33,6 +36,7 @@ def main() -> None:
         raise SystemExit(f"Incomplete deploy. Missing files: {names}")
 
     for module_name in (
+        "bot",
         "app.config",
         "app.copywriter",
         "app.formatting",
@@ -41,7 +45,10 @@ def main() -> None:
         "app.models",
         "app.mockup_generator",
         "app.local_mockup_generator",
+        "app.openai_mockup_generator",
+        "app.image_delivery",
         "app.generation_router",
+        "app.version",
         "app.publisher",
         "app.reference_catalog",
         "app.scheduling",
@@ -50,7 +57,7 @@ def main() -> None:
     ):
         import_module(module_name)
 
-    print("Render deploy check passed.")
+    print("Deployment check passed.")
 
 
 if __name__ == "__main__":

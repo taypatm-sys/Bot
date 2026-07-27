@@ -140,9 +140,14 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
 
 
 class PostRepository:
-    """Queue storage with PostgreSQL support and an automatic local SQLite fallback."""
+    """Queue storage with PostgreSQL support and an optional SQLite fallback."""
 
-    def __init__(self, source: DatabaseSource):
+    def __init__(
+        self,
+        source: DatabaseSource,
+        *,
+        allow_sqlite_fallback: bool = False,
+    ):
         source_text = str(source)
         self.database_url = (
             source_text if source_text.startswith(POSTGRES_PREFIXES) else ""
@@ -150,6 +155,7 @@ class PostRepository:
         self.path = None if self.database_url else Path(source)
         self._pool: Any = None
         self._was_fallback: bool = False
+        self.allow_sqlite_fallback = bool(allow_sqlite_fallback)
 
     @property
     def backend_name(self) -> str:
@@ -164,9 +170,15 @@ class PostRepository:
     def _fallback_to_sqlite(self, reason: str) -> None:
         import logging
 
+        if not self.allow_sqlite_fallback:
+            raise RuntimeError(
+                "PostgreSQL недоступен. Автоматический переход на SQLite отключен, "
+                "чтобы Railway не потерял данные на временном диске. "
+                f"Причина: {reason}"
+            )
         logging.getLogger(__name__).warning(
-            "⚠️ ВНИМАНИЕ: Ошибка подключения к PostgreSQL (%s). "
-            "Переключаюсь на локальную базу SQLite для бесперебойной работы!",
+            "⚠️ Ошибка подключения к PostgreSQL (%s). "
+            "Разрешен переход на локальную SQLite.",
             reason,
         )
         if self._pool is not None:
@@ -221,6 +233,8 @@ class PostRepository:
                         yield connection
                     return
             except Exception as error:
+                if not self.allow_sqlite_fallback:
+                    raise
                 self._fallback_to_sqlite(str(error))
 
         if self.path is None:
@@ -246,10 +260,7 @@ class PostRepository:
 
     def initialize(self) -> None:
         if self.database_url:
-            try:
-                self._ensure_pool()
-            except Exception as error:
-                self._fallback_to_sqlite(str(error))
+            self._ensure_pool()
 
         id_column = (
             "BIGSERIAL PRIMARY KEY"
@@ -1263,6 +1274,64 @@ class PostRepository:
             key = str(row["simple_status"] or "pending")
             result[key] = int(row["amount"] or 0)
         return result
+
+
+    def reference_status_breakdown(self) -> dict[str, dict[str, int]]:
+        """Return lightweight reference metadata without loading image blobs."""
+        with self._connect() as connection:
+            ready_rows = self._execute(
+                connection,
+                """
+                SELECT tags_json
+                FROM reference_assets
+                WHERE status = 'ready'
+                """,
+            ).fetchall()
+            lifecycle_rows = self._execute(
+                connection,
+                """
+                SELECT lifecycle_state, simple_status, simple_level
+                FROM reference_assets
+                """,
+            ).fetchall()
+
+        garments: dict[str, int] = {}
+        genders: dict[str, int] = {}
+        lifecycle: dict[str, int] = {}
+        levels: dict[str, int] = {}
+
+        for row in ready_rows:
+            try:
+                tags = json.loads(str(row["tags_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                tags = {}
+            if not isinstance(tags, dict):
+                tags = {}
+            garment_values = tags.get("garment_types", [])
+            if isinstance(garment_values, str):
+                garment_values = [garment_values]
+            if isinstance(garment_values, (list, tuple, set)):
+                for raw in garment_values:
+                    key = str(raw or "").strip()
+                    if key:
+                        garments[key] = garments.get(key, 0) + 1
+            gender = str(tags.get("gender", "unisex") or "unisex")
+            genders[gender] = genders.get(gender, 0) + 1
+
+        for row in lifecycle_rows:
+            state = str(row["lifecycle_state"] or "raw")
+            lifecycle[state] = lifecycle.get(state, 0) + 1
+            simple_status = str(row["simple_status"] or "pending")
+            if simple_status in {"ready", "skipped"}:
+                level = str(row["simple_level"] or "C")
+                levels[level] = levels.get(level, 0) + 1
+
+        return {
+            "garments": garments,
+            "genders": genders,
+            "lifecycle": lifecycle,
+            "levels": levels,
+        }
 
     def retry_failed_references(self) -> int:
         now = _iso(datetime.now(UTC))

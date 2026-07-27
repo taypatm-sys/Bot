@@ -18,6 +18,7 @@ from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
 from app.storage import PostRepository
 from app.template_store import CaptionTemplateStore
+from app.version import APP_VERSION
 
 
 DEFAULT_PRODUCT_PRESETS = (
@@ -29,11 +30,20 @@ DEFAULT_PRODUCT_PRESETS = (
 
 
 async def main() -> None:
+    logging.getLogger(__name__).info("Starting Taypa bot version %s", APP_VERSION)
+    # Open the Railway/Render health endpoint before database migrations and
+    # reference initialization. This prevents false 503 healthcheck failures
+    # during a normal cold start.
+    health_runner = await start_health_server()
+
     config = Config.from_env()
     config.ensure_runtime_paths()
 
     bot = Bot(token=config.telegram_bot_token)
-    repository = PostRepository(config.database_source)
+    repository = PostRepository(
+        config.database_source,
+        allow_sqlite_fallback=config.allow_sqlite_fallback,
+    )
     try:
         repository.initialize()
     except Exception:
@@ -147,7 +157,6 @@ async def main() -> None:
         )
     )
 
-    health_runner = await start_health_server()
     try:
         # Render keeps the previous deployment alive until the new health endpoint
         # becomes available. Open the port first, then wait for the old polling
@@ -171,7 +180,7 @@ async def main() -> None:
                 BotCommand(command="template", description="Шаблон подписи"),
                 BotCommand(command="settemplate", description="Изменить шаблон"),
                 BotCommand(command="presets", description="Готовые пресеты"),
-                BotCommand(command="start_post", description="Создать пост с макетом"),
+                BotCommand(command="start_post", description="Создать пост из готового фото"),
                 BotCommand(command="model", description="Фото на модели"),
                 BotCommand(command="references", description="База референсов"),
                 BotCommand(command="check", description="Проверить настройки"),

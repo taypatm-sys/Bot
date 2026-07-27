@@ -1,3 +1,17 @@
+## V6.2.8 - полный аудит Railway, Telegram UI и платной генерации
+
+- Исправлены раздельные сценарии «Создать пост» и «Фото на модели».
+- Health endpoint запускается до миграций базы и подготовки референсов.
+- Docker build выполняет компиляцию и импорт всех модулей, поэтому ошибки вроде отсутствующего `Optional` блокируют сборку, а не падают после deployment.
+- PostgreSQL больше не переключается на временную SQLite без явного `ALLOW_SQLITE_FALLBACK=true`.
+- При PostgreSQL не используется локальный SingleInstance lock, который мог допустить двойной Telegram polling на разных серверах.
+- Платная генерация запускается только с референсом, прошедшим проверку. Несовместимый подтвержденный референс автоматически отклоняется.
+- Ошибка отправки предпросмотра освобождает резерв референса и не запускает платный API.
+- Уточнены OpenAI size/quality, точный итоговый формат 1024x1280 4:5 и учет стоимости.
+- `/check` показывает версию, состояние провайдеров, последнюю генерацию, Request ID, расходы и референсы таблицей.
+- Администраторы из PostgreSQL получают уведомления о публикациях так же, как администраторы из ENV.
+- Добавлены `railway.toml`, `.dockerignore` и безопасные значения ENV.
+
 ## V6.2.0 - выбор генератора: простой режим, Gemini или OpenAI
 
 - После анализа макета доступны три режима: локальный OpenCV, Gemini и OpenAI.
@@ -34,11 +48,11 @@ OPENAI_IMAGE_QUALITY=medium
 - **Исключено уменьшение принта**: если на макете принт занимает всю верхнюю часть спины/груди (от плеча до плеча, 60–85% ширины), ИИ обязан генерировать на модели принт такого же огромного пропорционального масштаба.
 - **Улучшено сканирование макета**: скорректированы дефолты в `build_source_guided_mockup_spec` до `56% × 48%` вместо мелких 18%, исключая ложные мелкие рамки.
 
-## V6.1.1 - Автоматический перехват ошибок PostgreSQL (Neon Quota Failover)
+## V6.1.1 - исторический режим PostgreSQL failover
 
-- **Автоматический переход на SQLite**: если база Neon PostgreSQL недоступна (например, превышен лимит передачи данных `exceeded the data transfer quota` или сбой сети), бот не падает при старте, а автоматически переключается на локальную базу SQLite.
-- **Устойчивость SingleInstanceGuard**: блокировка параллельного polling автоматически переходит на файловый замок при недоступности PostgreSQL.
-- **Повышена скорость старта**: таймаут подключения снижен с 30 до 10 секунд для быстрого подхвата резервного режима.
+- В этой старой версии использовался автоматический переход на SQLite.
+- Начиная с V6.2.8 он по умолчанию отключен, потому что файловая система Railway временная. Для локальной разработки его можно явно включить через `ALLOW_SQLITE_FALLBACK=true`.
+- При недоступной PostgreSQL блокировка polling не заменяется локальным файловым lock на другом сервере.
 
 ## V6.1.0 - Полная доработка, UX и повышение стабильности
 
@@ -586,3 +600,10 @@ Do not redeploy or restart Render while a paid image request is running. If a re
 - `/check` and the Settings check no longer fail when Telegram returns `member list is inaccessible`.
 - The channel is still verified with `getChat`; only the unavailable member-status field is marked as `доступен, список участников закрыт`.
 - Other channel, database and configuration errors continue to be reported normally.
+
+## V6.2.7 - References button and lightweight catalog status
+
+- Fixed the Telegram Settings -> References button.
+- Reference status now reads only metadata and counters instead of downloading all image blobs from PostgreSQL.
+- Added immediate loading feedback, a 20-second timeout, visible error messages, and a Back to settings button.
+- The /references command and Refresh status action use the same non-blocking path.

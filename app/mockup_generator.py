@@ -1657,12 +1657,12 @@ class MockupGenerator:
         ):
             return MockupAnalysisError(
                 "Gemini API не принял ключ или у ключа нет доступа к модели анализа. "
-                "Проверьте GEMINI_API_KEY и GEMINI_MODEL в Render."
+                "Проверьте GEMINI_API_KEY и GEMINI_MODEL в переменных сервера."
             )
         if code == 404 or "NOT_FOUND" in message:
             return MockupAnalysisError(
                 "Модель анализа не найдена для этого ключа. Проверьте GEMINI_MODEL "
-                "в Render."
+                "в переменных сервера."
             )
         if code == 400 or "INVALID_ARGUMENT" in message:
             return MockupAnalysisError(
@@ -1846,7 +1846,7 @@ class MockupGenerator:
         if code == 404 or "404 NOT_FOUND" in message:
             return MockupGenerationError(
                 "Модель генерации изображений недоступна для этого ключа Gemini. "
-                "Проверьте GEMINI_IMAGE_MODEL в Render."
+                "Проверьте GEMINI_IMAGE_MODEL в переменных сервера."
             )
         if code in {401, 403} or any(
             marker in message
@@ -1854,7 +1854,7 @@ class MockupGenerator:
         ):
             return MockupGenerationError(
                 "Ключ Gemini API недействителен или не имеет доступа к модели. "
-                "Проверьте GEMINI_API_KEY в Render."
+                "Проверьте GEMINI_API_KEY в переменных сервера."
             )
         if code == 400 or "INVALID_ARGUMENT" in message:
             return MockupGenerationError(

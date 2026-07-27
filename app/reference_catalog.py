@@ -1984,19 +1984,11 @@ class ReferenceCatalog:
         stats = self.repository.reference_stats()
         simple_stats = self.repository.simple_reference_stats()
         queue_details = self.repository.reference_queue_details()
-        assets = self.repository.list_ready_reference_assets()
-        all_assets = self.repository.list_reference_assets(limit=1000)
-        lifecycle: Counter[str] = Counter(asset.lifecycle_state for asset in all_assets)
-        levels: Counter[str] = Counter(
-            asset.simple_level
-            for asset in all_assets
-            if asset.simple_status in {"ready", "skipped"}
-        )
-        garments: Counter[str] = Counter()
-        genders: Counter[str] = Counter()
-        for asset in assets:
-            garments.update(asset.tags.get("garment_types", []))
-            genders.update([str(asset.tags.get("gender", "unisex"))])
+        breakdown = self.repository.reference_status_breakdown()
+        lifecycle = Counter(breakdown.get("lifecycle", {}))
+        levels = Counter(breakdown.get("levels", {}))
+        garments = Counter(breakdown.get("garments", {}))
+        genders = Counter(breakdown.get("genders", {}))
         garment_labels = {
             "t-shirt": "футболки",
             "hoodie": "худи",
