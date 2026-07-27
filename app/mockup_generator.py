@@ -602,7 +602,7 @@ def build_source_guided_mockup_spec(
         print_box = _ResponseBox(x=38, y=27, width=24, height=14)
     else:
         garment_box = _ResponseBox(x=20, y=7, width=60, height=90)
-        print_box = _ResponseBox(x=41, y=27, width=18, height=18)
+        print_box = _ResponseBox(x=22, y=12, width=56, height=48)
 
     proxy = _DetectedMockupResponse(
         side=raw.side,
@@ -1078,78 +1078,71 @@ def build_model_photo_prompt(
             measurements = (
                 f"The printed side is the {spec.side}. The garment is a "
                 f"{spec.garment_type}, color: {spec.shirt_color}, fabric finish: "
-                f"{spec.fabric_finish}, fit: {spec.fit}. The print width is about "
-                f"{spec.print_width_percent}% of the wearable torso panel width. "
-                f"The print height is about {spec.print_height_percent}% of the "
-                f"garment height from neckline to hem. Its top begins about "
-                f"{spec.print_top_offset_percent}% of that height below the neckline. "
-                f"Its left edge begins about {spec.print_left_offset_percent}% of "
-                f"the torso panel width from the left panel edge, with the print "
-                f"center at {spec.print_center_x_percent}% of the panel width. "
-                f"Construction: {spec.construction_details}. The intended wearer "
-                f"is {spec.target_gender}, target age group {spec.target_age_group}. "
+                f"{spec.fabric_finish}, fit: {spec.fit}. "
+                f"CRITICAL PRINT SCALE CONTRACT:\n"
+                f"- The print width is {spec.print_width_percent}% of the wearable torso panel width.\n"
+                f"- The print height is {spec.print_height_percent}% of the garment torso height.\n"
+                f"- Top offset is {spec.print_top_offset_percent}% below the neckline/collar.\n"
+                f"- Left offset is {spec.print_left_offset_percent}% of torso width, center at {spec.print_center_x_percent}%.\n"
+                f"Construction: {spec.construction_details}. The intended wearer is {spec.target_gender}, target age group {spec.target_age_group}. "
                 f"The artwork mood tags are {', '.join(spec.moods)}. "
-                "CRITICAL PRINT SCALE CONTRACT: The new print scale and proportions MUST MATCH Image 1 (Source Mockup) EXACTLY. "
-                "COMPLETELY IGNORE the print size visible on Image 3 (Reference Photo). "
-                "If Image 1 has a large print covering most of the back/chest, the new print MUST be equally large on the model."
+                "CRITICAL MANDATORY PRINT SCALE CONTRACT: Image 1 (Source Product) is the ABSOLUTE MASTER SOURCE for print size, scale, and placement on the model. "
+                "Visually inspect the print on Image 1: if the print spans wide across the shoulders/back/chest (filling 60-85% of the panel width), the print on the generated model MUST BE EQUALLY LARGE AND WIDE. "
+                "DO NOT shrink, reduce, downscale, or minimize the print size! The ratio of (print width / torso width) on the model MUST EXACTLY MATCH Image 1."
             )
 
     if has_separate_print and has_style_reference:
         source_rule = (
             "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
-            "for exact garment type, color, wash, cut, fit, construction, print scale "
-            "and placement. Image 2 is EXACT PRINT SOURCE and must be copied without "
-            "redrawing or changing text. Image 3 is STYLE REFERENCE ONLY and controls "
-            "camera distance, crop, pose, lighting direction and background. "
+            "for exact garment type, color, wash, cut, fit, construction, AND EXACT PRINT SCALE AND PLACEMENT. "
+            "Image 2 is EXACT PRINT SOURCE and must be copied without redrawing or changing text. "
+            "Image 3 is STYLE REFERENCE ONLY and controls camera distance, crop, pose, lighting direction and background. "
+            "DO NOT USE THE PRINT SIZE FROM IMAGE 3. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
             "MANDATORY ERASURE: Before placing the print, COMPLETELY ERASE and REMOVE "
             "every trace of any print, text, logo, graphic, or artwork that was originally "
-            "visible on the garment in Image 3. The garment surface must be rendered as "
-            "clean blank fabric first, then the print from Image 1+2 is placed on top. "
-            "Zero ghost traces, shadows, or remnants of the original Image 3 artwork "
-            "may remain in the final image."
+            "visible on the garment in Image 3. Render the garment surface as clean blank fabric first, "
+            "then place the print from Image 1+2 on top at the EXACT SAME PROPORTIONAL SCALE as Image 1."
         )
     elif has_source_detail and has_style_reference:
         source_rule = (
             "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT "
-            "and the only authority for exact garment type, color, wash, cut, fit, "
+            "and the ABSOLUTE MASTER AUTHORITY for exact garment type, color, wash, cut, fit, "
             "construction, print scale and placement. Image 2 is a magnified detail "
             "from the same product and locks every letter, outline, spacing and color. "
             "Image 3 is STYLE REFERENCE ONLY and controls pose, camera, crop, lighting "
             "direction and background. "
+            "DO NOT USE THE PRINT SIZE FROM IMAGE 3. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
             "MANDATORY ERASURE: Before placing the print, COMPLETELY ERASE and REMOVE "
             "every trace of any print, text, logo, graphic, or artwork that was originally "
-            "visible on the garment in Image 3. The garment surface must be rendered as "
-            "clean blank fabric first, then the print from Image 1+2 is placed on top. "
-            "Zero ghost traces, shadows, or remnants of the original Image 3 artwork "
-            "may remain in the final image."
+            "visible on the garment in Image 3. Render the garment surface as clean blank fabric first, "
+            "then place the print from Image 1+2 on top at the EXACT SAME PROPORTIONAL SCALE as Image 1."
         )
     elif has_separate_print:
         source_rule = (
             "Two source images are supplied. The first image is the placement reference "
             "for garment type, color, cut, side, scale and position. The second image is "
-            "the exact high-quality print source. Use the second image for every artwork "
-            "pixel and use the first only to preserve placement on the product."
+            "the exact high-quality print source. Use the second image for artwork pixels and the first for exact scale."
         )
     elif has_source_detail:
         source_rule = (
             "Two source images are supplied. Image 1 is the exact complete product "
-            "source. Image 2 is a magnified crop from the same product. Use both as "
-            "locked sources for the garment and artwork. Do not redesign the print."
+            "source and authority for print scale. Image 2 is a magnified crop from the same product."
         )
     elif has_style_reference:
         source_rule = (
             "IMAGE ROLE CONTRACT - DO NOT MIX THE ROLES. Image 1 is SOURCE PRODUCT: "
-            "it is the only authority for garment type, exact color, wash, cut, fit, "
-            "construction, print pixels, print text, scale and placement. Image 2 is "
-            "STYLE REFERENCE ONLY: use only its camera distance, crop, body orientation, "
+            "it is the ONLY authority for garment type, exact color, wash, cut, fit, "
+            "construction, print pixels, print text, AND PRINT SCALE AND PLACEMENT. "
+            "Image 2 is STYLE REFERENCE ONLY: use only its camera distance, crop, body orientation, "
             "pose, lighting direction and background. "
+            "DO NOT USE THE PRINT SIZE FROM IMAGE 2. COPY THE PRINT SCALE AND POSITION DIRECTLY FROM IMAGE 1. "
             "MANDATORY ERASURE: Before placing the print from Image 1, COMPLETELY ERASE "
             "and REMOVE every trace of any print, text, logo, graphic, or artwork that "
             "was originally visible on the garment in Image 2. First render the garment "
             "surface as clean blank fabric matching Image 1's color, then place Image 1's "
-            "print on top. Zero ghost traces, shadows, outlines, or remnants of the "
-            "original Image 2 artwork may remain in the final image. The final wearer "
-            "must wear the exact product from Image 1, not an edited version of Image 2's garment."
+            "print on top at the EXACT SAME PROPORTIONAL SCALE as Image 1. Zero ghost traces, "
+            "shadows, outlines, or remnants of the original Image 2 artwork may remain. "
+            "The final wearer must wear the exact product from Image 1."
         )
     else:
         source_rule = (
