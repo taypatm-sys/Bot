@@ -543,3 +543,11 @@ ADMIN_TELEGRAM_IDS=987654321,555555555
 - нет рук, волос, сумки, шва или сильной складки в зоне восстановления.
 
 Крупный принт, acid wash, сложная текстура или недостаточные границы автоматически переводят задачу в Gemini. Это ограничение предотвращает заметные гладкие пятна и остатки старого изображения.
+
+## V6.2.1 - OpenAI timeout and visible error handling
+
+- Added a hard 4 minute timeout for OpenAI image generation.
+- Added a 3 minute timeout for paid-reference preview selection.
+- OpenAI errors and preview failures are now sent to Telegram instead of leaving the interface on Loading.
+- OpenAI SDK now uses a finite timeout and one retry.
+- The status message now confirms when the request has actually been sent to OpenAI.
