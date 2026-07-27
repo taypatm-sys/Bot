@@ -1223,18 +1223,12 @@ def build_model_photo_prompt(
         )
     else:
         product_physics = (
-            "REAL DTF ON CLOTHING:\n"
-            "- The artwork is a thin opaque DTF heat-transfer layer bonded to the "
-            "fabric surface. It follows body curvature with only subtle natural "
-            "micro-wrinkles and small changes in reflection, sharpness and shadow. "
-            "Do not place a strong crease, fold or seam through the center of the "
-            "printed artwork unless it is truly unavoidable from the pose.\n"
-            "- DTF is not screen ink soaked into the weave. Keep its printed colors "
-            "recognizable and mostly opaque, with only a very mild satin surface "
-            "response. Scene light and white balance affect garment and print together.\n"
-            "- Reduce the flat mockup's digital punch only enough to match a real "
-            "phone photo. No neon glow, luminous white, uniform brightness or sticker "
-            "effect. Do not blur the artwork to fake realism.\n"
+            "REAL DTF ON CLOTHING & FABRIC INTEGRATION:\n"
+            "- FABRIC FOLD & CONTOUR CONFORMITY: The artwork is NOT a flat 2D sticker or digital overlay! "
+            "It is a real DTF heat-transfer layer bonded to the fabric surface. The print text and graphic MUST bend, warp, and contour naturally following the curves, folds, and wrinkles of the t-shirt back/chest fabric.\n"
+            "- LIGHTING & SHADOW INTEGRATION: The print artwork MUST absorb the exact directional lighting, ambient shadows, and color temperature of the scene. If a shadow falls across the model's back or shirt fabric, that SAME shadow MUST fall over the print text/graphic, darkening the ink naturally in sync with the fabric. Never render uniform flat digital brightness across the print.\n"
+            "- FABRIC GRAIN & MICRO-TEXTURE: Subtle fabric weave texture and micro-folds must show naturally through the print ink, rendering the print physically part of the garment.\n"
+            "- Natural smartphone camera response: authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
         )
         composition = (
             "- Allow a natural seated, walking, active or standing composition as "
@@ -1486,10 +1480,10 @@ class MockupGenerator:
         prompt = (
             "Measure the clothing product and its DTF print in this mockup. Ignore every "
             "background element outside the garment, including large pale letters, "
-            "logos, patterns, watermarks and shadows. garment_panel_box is the usable "
-            "print-bearing torso panel from neckline to hem without sleeves. For a cap, "
-            "it is the usable front crown panel. print_box is a tight box around the "
-            "complete printed artwork, including all text, outlines and detached parts. "
+            "logos, patterns, watermarks and shadows. "
+            "garment_panel_box is STRICTLY the main wearable torso panel from left armhole seam to right armhole seam, and from neckline/collar to bottom hem. DO NOT include extended sleeves in garment_panel_box width! "
+            "print_box is a tight bounding box around the complete printed artwork, including all lines of text, outlines and detached graphic parts. "
+            "For large prints that stretch wide across the torso panel, print_box.width MUST reflect that large coverage (e.g., 65-90% of the torso panel). "
             "For both boxes, x and y are the top-left corner and every number is a "
             "percentage of the complete supplied image from 0 to 100. Classify the "
             "garment as t-shirt, hoodie, sweatshirt, long-sleeve, zip-hoodie, cap or "
