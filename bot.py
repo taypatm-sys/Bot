@@ -13,6 +13,7 @@ from app.handlers import build_router
 from app.health import start_health_server
 from app.instance_guard import SingleInstanceError, SingleInstanceGuard
 from app.mockup_generator import MockupGenerator
+from app.openai_mockup_generator import OpenAIMockupGenerator
 from app.publisher import Publisher
 from app.reference_catalog import ReferenceCatalog
 from app.storage import PostRepository
@@ -75,6 +76,12 @@ async def main() -> None:
         analysis_coordinator=analysis_coordinator,
     )
     local_generator = LocalMockupGenerator()
+    openai_generator = OpenAIMockupGenerator(
+        api_key=config.openai_api_key,
+        image_model=config.openai_image_model,
+        image_size=config.openai_image_size,
+        image_quality=config.openai_image_quality,
+    )
     reference_catalog = ReferenceCatalog(
         repository=repository,
         api_key=config.gemini_api_key,
@@ -122,6 +129,7 @@ async def main() -> None:
             copywriter=copywriter,
             mockup_generator=mockup_generator,
             local_generator=local_generator,
+            openai_generator=openai_generator,
             reference_catalog=reference_catalog,
             publisher=publisher,
             template_store=template_store,

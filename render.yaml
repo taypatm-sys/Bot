@@ -29,6 +29,14 @@ services:
         value: gemini-3.1-flash-lite-image
       - key: GEMINI_IMAGE_SIZE
         value: 1K
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_IMAGE_MODEL
+        value: gpt-image-1.5
+      - key: OPENAI_IMAGE_SIZE
+        value: 1024x1536
+      - key: OPENAI_IMAGE_QUALITY
+        value: medium
       - key: MOCKUP_VARIANTS
         value: 1
       - key: REFERENCE_IMPORT_DELAY_SECONDS

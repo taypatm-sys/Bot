@@ -191,3 +191,9 @@ Google AI Studio для используемого `GEMINI_API_KEY` необхо
 Стандартная серия создает одно изображение 1K и по текущему тарифу стоит около
 0.0336 доллара без учета небольшого входного запроса. Актуальная цена указана на странице:
 `https://ai.google.dev/gemini-api/docs/pricing`.
+
+# Optional OpenAI image generation
+OPENAI_API_KEY=
+OPENAI_IMAGE_MODEL=gpt-image-1.5
+OPENAI_IMAGE_SIZE=1024x1536
+OPENAI_IMAGE_QUALITY=medium
