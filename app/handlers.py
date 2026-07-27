@@ -962,6 +962,28 @@ async def is_admin_message(
     return False
 
 
+async def _get_channel_status_for_check(
+    bot: Bot,
+    channel_id: int | str,
+    bot_id: int,
+) -> str:
+    """Return bot membership status without failing on closed member lists."""
+    try:
+        member = await bot.get_chat_member(channel_id, bot_id)
+        return str(member.status)
+    except Exception as error:
+        message = str(error).casefold()
+        if "member list is inaccessible" in message:
+            logger.warning(
+                "Telegram не разрешил проверить участника канала %s. "
+                "Канал доступен, но список участников закрыт: %s",
+                channel_id,
+                error,
+            )
+            return "доступен, список участников закрыт"
+        raise
+
+
 async def is_admin_callback(
     callback: CallbackQuery,
     config: Config,
@@ -2114,11 +2136,13 @@ def build_router(
             repository.get_setting("caption_template")
             bot_info = await bot.get_me()
             chat = await bot.get_chat(config.channel_id)
-            member = await bot.get_chat_member(config.channel_id, bot_info.id)
+            channel_status = await _get_channel_status_for_check(
+                bot, config.channel_id, bot_info.id
+            )
             report = _build_check_report(
                 bot_username=bot_info.username or str(bot_info.id),
                 channel_name=str(chat.title or chat.id),
-                channel_status=str(member.status),
+                channel_status=channel_status,
                 config=config,
                 repository=repository,
                 chat_id=message.chat.id,
@@ -2207,11 +2231,13 @@ def build_router(
         try:
             bot_info = await bot.get_me()
             chat = await bot.get_chat(config.channel_id)
-            member = await bot.get_chat_member(config.channel_id, bot_info.id)
+            channel_status = await _get_channel_status_for_check(
+                bot, config.channel_id, bot_info.id
+            )
             report = _build_check_report(
                 bot_username=bot_info.username or str(bot_info.id),
                 channel_name=str(chat.title or chat.id),
-                channel_status=str(member.status),
+                channel_status=channel_status,
                 config=config,
                 repository=repository,
                 chat_id=callback.message.chat.id,

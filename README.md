@@ -580,3 +580,9 @@ Do not redeploy or restart Render while a paid image request is running. If a re
 - Added the missing `Optional` import in `app/handlers.py`.
 - Fixes the startup crash: `NameError: name 'Optional' is not defined`.
 - Verified all Python files compile successfully.
+
+## V6.2.6 - Telegram closed member list check fix
+
+- `/check` and the Settings check no longer fail when Telegram returns `member list is inaccessible`.
+- The channel is still verified with `getChat`; only the unavailable member-status field is marked as `доступен, список участников закрыт`.
+- Other channel, database and configuration errors continue to be reported normally.
