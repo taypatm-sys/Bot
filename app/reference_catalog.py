@@ -201,6 +201,12 @@ class ReferenceTags(BaseModel):
     print_area_visibility: int = Field(ge=0, le=100)
     garment_is_plain: bool = False
     existing_print_coverage_percent: int = Field(default=0, ge=0, le=100)
+    face_visibility: Literal["hidden", "partial", "visible", "not-applicable"] = "visible"
+    head_direction: Literal["down", "forward", "up", "left", "right", "away", "unclear"] = "unclear"
+    face_occlusion: str = Field(default="", max_length=300)
+    shot_character: Literal[
+        "candid-phone", "documentary", "editorial", "studio", "mirror", "other"
+    ] = "other"
     composition_notes: str = Field(min_length=1, max_length=600)
     usable: bool
     unusable_reason: str = Field(default="", max_length=600)
@@ -1354,9 +1360,15 @@ class ReferenceCatalog:
             "hands or fingers hold, pull or cover the chest panel, the person is lying down or reclining, "
             "the room lighting is dark/obscured, the garment area is mostly hidden, the image is "
             "a collage, an isolated product, a drawing, a studio catalog cutout or too low "
-            "quality. composition_notes must briefly preserve the useful pose, camera, "
-            "crop, fabric folds and ordinary details, without identifying or copying the "
-            "person. Return objective tags, not marketing language."
+            "quality. Record face_visibility exactly: hidden when the face is fully covered "
+            "by a cap, phone, hair or crop; partial when only part of the face is visible. "
+            "Record head_direction, face_occlusion and shot_character. For cap references, "
+            "composition_notes must explicitly state the brim angle, whether the cap hides "
+            "the face, how far the head tilts, how large the cap is in frame, and the exact "
+            "crop. For all references, composition_notes must briefly preserve the useful "
+            "pose, camera height, subject position, crop, ordinary background, fabric folds "
+            "and occlusions, without identifying or copying the person. Return objective "
+            "tags, not marketing language."
         )
         response = self.client.models.generate_content(
             model=self.analysis_model,

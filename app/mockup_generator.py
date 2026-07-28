@@ -1177,39 +1177,49 @@ def build_model_photo_prompt(
     reference_framing = str(reference_tags.get("framing", "")).strip()
     reference_angle = str(reference_tags.get("camera_angle", "")).strip()
     reference_setting = str(reference_tags.get("setting", "")).strip()
+    reference_face_visibility = str(reference_tags.get("face_visibility", "")).strip()
+    reference_head_direction = str(reference_tags.get("head_direction", "")).strip()
+    reference_face_occlusion = str(reference_tags.get("face_occlusion", "")).strip()
+    reference_shot_character = str(reference_tags.get("shot_character", "")).strip()
     if has_style_reference:
         reference_direction = (
-            "MANUALLY SELECTED PHOTOGRAPHIC REFERENCE - REQUIRED:\n"
-            "- This manually selected photographic reference is mandatory and must control composition.\n"
-            "- The final source image is not optional. Closely match its camera "
-            "distance, crop, body orientation, pose, lens feel, background density "
-            "and overall photographic composition. Do not invent a different street, "
-            "studio, room, activity or camera position.\n"
-            "- CRITICAL REFERENCE CLEANUP STEP: The reference photo's garment has its own "
-            "print/logo/text. You MUST treat this as a TWO-STEP process: STEP 1 - mentally "
-            "erase the reference garment's ENTIRE original artwork, rendering it as clean "
-            "blank fabric in the reference's color. STEP 2 - place ONLY the artwork from "
-            "Image 1 (Source Product) onto that now-clean garment surface. The final image "
-            "must show ONLY Image 1's print. There must be ZERO traces, ghost outlines, "
-            "shadow remnants, partial letters, or any visual artifact from the reference "
-            "photo's original print. If you can see even one pixel from the reference's "
-            "original artwork in the output, the generation has FAILED.\n"
-            "- DIFFERENT PERSON REQUIREMENT: The generated model must be a COMPLETELY "
-            "DIFFERENT person from the one in the reference photo. Use a different face, "
-            "different hairstyle, different body type, and different ethnicity. Do NOT "
-            "clone or closely resemble the reference person's appearance. The reference "
-            "controls ONLY composition, pose, camera angle and background — NOT the "
-            "person's identity, face, or look.\n"
-            "- No crowd, no group of pedestrians and no busy public background. Do not "
-            "add extra people. Keep the scene visually quiet and product-focused.\n"
-            "- For clothing, the wearer must be close enough that the garment and print "
-            "are immediately inspectable. Prefer waist-up or three-quarter framing. The "
-            "wearer should occupy about 75 to 90 percent of the image height.\n"
-            "- Preserve the exact source garment color and wash. Do not reinterpret "
-            "charcoal, washed gray, beige or any other color through creative grading.\n"
+            "STRICT REFERENCE SHOT RECONSTRUCTION - HIGHEST PRIORITY:\n"
+            "- The photographic reference is a spatial shot blueprint, not a loose mood board. "
+            "Reconstruct the same shot geometry before replacing the product.\n"
+            "- Match the reference's subject scale, subject position, camera height, camera "
+            "distance, crop boundaries, head angle, torso angle, shoulder angle, body orientation, "
+            "cap or garment orientation, lens feel, background category, background blur, lighting "
+            "direction and ordinary smartphone character. Do not invent a new pose or camera setup.\n"
+            "- FACE VISIBILITY IS LOCKED. Preserve exactly how much of the face is visible in the "
+            "reference. If a cap brim, phone, hair, hand, shadow or crop hides the face, keep it hidden. "
+            "Do not lift the chin, reveal the eyes, straighten the head, beautify the face or convert the "
+            "shot into a portrait.\n"
+            "- For a cap reference, match the exact head tilt, brim angle, crown perspective, amount of "
+            "face covered by the brim, cap size in frame and crop around the shoulders. A cap may dominate "
+            "the frame and the face may remain fully hidden.\n"
+            "- Preserve visible non-product clothing, hands, straps, hair silhouette and background objects "
+            "when they define the composition, but do not let them cover the new print more than in the "
+            "reference.\n"
+            "- Do not transform a casual, grainy, imperfect phone photo into a polished fashion campaign, "
+            "beauty portrait, studio image or premium lookbook. Keep the same candid realism and imperfection.\n"
+            "- The generated person must be a different fictional adult, but identity replacement must not "
+            "change the reference pose, silhouette, head direction, face occlusion or crop. If the face is "
+            "hidden, keep it hidden rather than inventing a visible new face.\n"
+            "- Replace only the target product and its artwork. The source product remains authoritative for "
+            "product type, exact color, wash, construction, print pixels, print scale and placement.\n"
+            "- Remove every trace of the reference product's original print, logo or text before placing the "
+            "source artwork. No ghost letters or remnants may remain.\n"
+            "- No extra people, no new props, no new room, no new street and no cleaner background than the "
+            "reference.\n"
+            "- Preserve the exact source product color and wash. Do not reinterpret charcoal, washed gray, "
+            "beige or any other color through creative grading.\n"
             f"- Catalog tags: framing={reference_framing or 'use the image'}, "
             f"angle={reference_angle or 'use the image'}, "
-            f"setting={reference_setting or 'use the image'}.\n"
+            f"setting={reference_setting or 'use the image'}, "
+            f"face_visibility={reference_face_visibility or 'read directly from image'}, "
+            f"head_direction={reference_head_direction or 'read directly from image'}, "
+            f"shot_character={reference_shot_character or 'read directly from image'}.\n"
+            + (f"- Face occlusion note: {reference_face_occlusion}.\n" if reference_face_occlusion else "")
             + (f"- Catalog composition note: {reference_notes}.\n" if reference_notes else "")
         )
     else:
@@ -1235,14 +1245,23 @@ def build_model_photo_prompt(
             "rounded crown. It is never perfectly flat and never turns into raised "
             "embroidered fibers.\n"
         )
-        composition = (
-            "- Use the requested close or seated direction. Frame the full crown, "
-            "brim and printed front panel safely inside the vertical 4:5 image. The "
-            "rest of the person may be cropped naturally.\n"
-            "- The cap must look worn normally on a real head, with believable brim "
-            "shadow and hair interaction. Do not create a catalog cutout or product "
-            "floating alone unless the supplied source itself is only a product shot.\n"
-        )
+        if has_style_reference:
+            composition = (
+                "- For this cap shot, follow the reference crop exactly. Do not require the "
+                "entire head, face or torso to be visible. Keep the full printed cap panel readable "
+                "only to the same extent as in the reference.\n"
+                "- Match the reference brim angle, crown perspective, head tilt and face occlusion. "
+                "The face may remain completely hidden. Do not turn the result into a face-forward portrait.\n"
+            )
+        else:
+            composition = (
+                "- Use the requested close or seated direction. Frame the full crown, "
+                "brim and printed front panel safely inside the vertical 4:5 image. The "
+                "rest of the person may be cropped naturally.\n"
+                "- The cap must look worn normally on a real head, with believable brim "
+                "shadow and hair interaction. Do not create a catalog cutout or product "
+                "floating alone unless the supplied source itself is only a product shot.\n"
+            )
     else:
         product_physics = (
             "REAL DTF ON CLOTHING & FABRIC INTEGRATION:\n"
@@ -1252,26 +1271,59 @@ def build_model_photo_prompt(
             "- FABRIC GRAIN & MICRO-TEXTURE: Subtle fabric weave texture and micro-folds must show naturally through the print ink, rendering the print physically part of the garment.\n"
             "- Natural smartphone camera response: authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
         )
-        composition = (
-            "- Allow a natural seated, walking, active or standing composition as "
-            "specified. Do not force the wearer into a straight catalog stance. "
-            "But keep the torso readable and avoid arm positions that create a heavy "
-            "vertical fold across the print.\n"
-            "- The complete printed artwork and the garment panel carrying it must "
-            "remain inside the central safe area. Legs, hands or unused background "
-            "may be cropped naturally. The person does not need to fill a fixed "
-            "head-to-mid-thigh template.\n"
-            "- For a back print, shoot naturally from behind or a rear three-quarter "
-            "angle. The back torso panel must face the camera and the artwork must stay "
-            "on the back. Never turn a back-print source into a front-facing shirt or "
-            "move the artwork to the chest. A full face is unnecessary. Move long hair "
-            "away from the printed area without making the hairstyle look staged.\n"
-        )
+        if has_style_reference:
+            composition = (
+                "- Follow the reference body position, crop, torso angle, shoulder angle and occlusions exactly. "
+                "Do not straighten the wearer, recenter the torso, zoom out or replace the action with a catalog pose.\n"
+                "- Keep the source print readable without changing the reference shot geometry. Preserve the same "
+                "relationship between hands, hair, straps, outerwear and the garment panel.\n"
+                "- Preserve the source side. A back print remains on the back and a front print remains on the front, "
+                "while the reference camera angle and body orientation remain locked.\n"
+            )
+        else:
+            composition = (
+                "- Allow a natural seated, walking, active or standing composition as "
+                "specified. Do not force the wearer into a straight catalog stance. "
+                "But keep the torso readable and avoid arm positions that create a heavy "
+                "vertical fold across the print.\n"
+                "- The complete printed artwork and the garment panel carrying it must "
+                "remain inside the central safe area. Legs, hands or unused background "
+                "may be cropped naturally. The person does not need to fill a fixed "
+                "head-to-mid-thigh template.\n"
+                "- For a back print, shoot naturally from behind or a rear three-quarter "
+                "angle. The back torso panel must face the camera and the artwork must stay "
+                "on the back. Never turn a back-print source into a front-facing shirt or "
+                "move the artwork to the chest. A full face is unnecessary. Move long hair "
+                "away from the printed area without making the hairstyle look staged.\n"
+            )
 
     if has_style_reference:
         direction_details = (
-            "- The manual photo reference overrides the generated location, action, "
-            "camera and framing suggestions. Follow the visible reference instead.\n"
+            "- Ignore generated location, action, camera and framing suggestions. The visible "
+            "reference image overrides them completely.\n"
+        )
+        wearer_direction = (
+            "- Preserve the reference's ordinary styling and candid body language. Do not force "
+            "a smile, visible eyes, a beauty pose, styled hair or a polished facial expression.\n"
+            "- Generate a different fictional adult only where identity is actually visible. "
+            "Never alter occlusion or pose merely to display the new identity.\n"
+        )
+        realism_direction = (
+            "REFERENCE-MATCHED REALISM:\n"
+            "- Match the reference's real camera quality, softness, grain, exposure, white balance, "
+            "depth of field and background clutter. Do not upgrade it into editorial photography.\n"
+            "- The result must feel like the next frame from the same casual phone-camera moment.\n\n"
+        )
+        safe_area_direction = (
+            "- Match the reference crop and asymmetric placement exactly. Do not recenter the subject "
+            "or zoom out to expose the full head or torso.\n"
+            "- Keep the source artwork readable, but do not change the shot geometry merely to create "
+            "an artificial social-media safe margin.\n"
+        )
+        variation_rule = (
+            f"- Variation token: {request_token}-{direction.seed}. Use it only for minor fictional identity "
+            "details that are actually visible. It must not change pose, crop, head angle, face occlusion, "
+            "camera, background, lighting or product placement from the reference."
         )
     else:
         direction_details = (
@@ -1280,6 +1332,28 @@ def build_model_photo_prompt(
             f"- Camera: {direction.camera}.\n"
             f"- Framing: {direction.framing}.\n"
             f"- Light: {direction.light}.\n"
+        )
+        wearer_direction = (
+            "- The person is genuinely occupied with the action, stylishly presented, attractive and well-groomed. "
+            "A hand, bag, cup or prop may overlap a small non-printed area naturally, but never hide the print.\n"
+            "- The model must have clean natural skin, neat hair and a credible streetwear appearance. "
+            "Avoid plastic skin, excessive retouching or facial distortions.\n"
+            "- Generate a completely new fictional non-celebrity adult.\n"
+        )
+        realism_direction = (
+            "EDITORIAL LOOKBOOK REALISM:\n"
+            "- Use natural photographic perspective, realistic skin texture, high-resolution garment detail, "
+            "sharp focus on the product and authentic subtle fabric folds.\n"
+            "- Keep the scene aesthetically coherent without making it look like a studio mockup or plastic AI portrait.\n\n"
+        )
+        safe_area_direction = (
+            "- Keep the full product and print at least 8% away from every image edge so "
+            "Telegram previews on different devices do not crop important product details. "
+            "The surrounding body and scene may use a more relaxed asymmetric frame.\n"
+        )
+        variation_rule = (
+            f"- Variation token: {request_token}-{direction.seed}. Use it only to make this wearer "
+            "and photographic moment different from earlier results."
         )
 
     return (
@@ -1316,28 +1390,16 @@ def build_model_photo_prompt(
         "REAL PHOTO DIRECTION:\n"
         f"- Wearer: {direction.person}.\n"
         f"{direction_details}"
-        "- The person is genuinely occupied with the action, stylishly presented, attractive and well-groomed. "
-        "A hand, bag, cup or prop may overlap a small non-printed area naturally, but never hide the print.\n"
-        "- The model must have clean flawless skin, handsome/attractive aesthetic facial features, neat well-groomed hair, "
-        "and a stylish streetwear lookbook appearance. No facial blemishes, skin acne, or unnatural distortions.\n"
-        "- IMPORTANT: Generate a COMPLETELY NEW fictional person. Do NOT copy or clone the "
-        "appearance, face, hairstyle, or ethnicity of any person visible in the reference "
-        "photo. The wearer must look distinctly different from the reference person.\n"
+        f"{wearer_direction}"
         "- The person gender must match the intended audience found in the artwork.\n\n"
-        "EDITORIAL LOOKBOOK REALISM:\n"
-        "- Use a crisp 35 mm portrait lens, natural outdoor daylight, photorealistic skin texture, "
-        "high resolution detail, sharp focus on the garment and print, and authentic subtle fabric folds.\n"
-        "- Keep the scene aesthetically pleasing, stylish, clean, and premium streetwear lookbook quality.\n\n"
+        f"{realism_direction}"
         "FORMAT AND SAFE AREA:\n"
         "- Vertical 4:5 image for a Telegram and social-media product post.\n"
         f"{composition}"
-        "- Keep the full product and print at least 8% away from every image edge so "
-        "Telegram previews on different devices do not crop important product details. "
-        "The surrounding body and scene may use a more relaxed asymmetric frame.\n"
+        f"{safe_area_direction}"
         "- The product and print remain readable without looking staged. No collage, split screen, "
         "mockup board, border, caption, watermark or extra graphic.\n"
-        f"- Variation token: {request_token}-{direction.seed}. Use it only to make "
-        "this wearer and photographic moment different from earlier results."
+        f"{variation_rule}"
     )
 
 
@@ -1779,11 +1841,13 @@ class MockupGenerator:
         if reference_image_bytes:
             contents.extend(
                 [
-                    "PHOTOGRAPHIC STYLE AND POSE REFERENCE ONLY (Image 3):\n"
-                    "WARNING: The clothing in this reference photo contains its own original printed text and graphics. "
-                    "DO NOT COPY ANY TEXT, WORD, LOGO, OR GRAPHIC FROM THIS REFERENCE IMAGE! "
-                    "ERASE ALL TEXT AND GRAPHICS VISIBLE ON THIS REFERENCE IMAGE BEFORE GENERATING. "
-                    "Use this image ONLY for pose, camera distance, background setting, and lighting direction:",
+                    "MANDATORY PHOTOGRAPHIC SHOT BLUEPRINT (Image 3):\n"
+                    "WARNING: The product in this reference photo contains its own original printed text and graphics. "
+                    "DO NOT COPY ANY TEXT, WORD, LOGO, GRAPHIC OR PRODUCT COLOR FROM THIS REFERENCE IMAGE. "
+                    "Use it as an exact spatial blueprint for crop, subject scale, head tilt, face visibility, face occlusion, "
+                    "cap or garment angle, camera height, body orientation, background, lighting and candid phone-camera character. "
+                    "If the face is hidden in this image, keep it hidden. Do not reveal the face or turn the shot into a portrait. "
+                    "Only replace the target product and artwork:",
                     types.Part.from_bytes(
                         data=reference_image_bytes,
                         mime_type=reference_mime_type or "image/jpeg",

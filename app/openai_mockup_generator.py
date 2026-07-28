@@ -249,11 +249,16 @@ class OpenAIMockupGenerator:
         )
         prompt += (
             "\n\nOPENAI IMAGE ORDER:\n"
-            "Image 1 is the product source and is the only source of garment color, fabric, cut and print.\n"
+            "Image 1 is the product source and is the only source of product color, fabric, cut and print.\n"
             "Image 2, when present, is the high resolution master print or source-detail crop.\n"
-            "The last image, when present, is only a pose, camera, lighting and background reference.\n"
-            "Never copy any text, logo, graphic or garment color from the reference image.\n"
-            "The final composition must be vertical 4:5 and must keep the entire head, torso and garment print inside the frame."
+            "The last image, when present, is the mandatory photographic shot reference. Never copy its text, logo, graphic or product color.\n"
+            + (
+                "When the photographic reference is present, match its exact crop, subject scale, head tilt, face visibility, face occlusion, cap angle, camera height and background. "
+                "Do not require the entire head, face or torso to be visible, and do not convert a hidden-face candid shot into a portrait. "
+                "Only the target product and artwork should change.\n"
+                if reference_image_bytes
+                else "Keep the product and artwork safely visible in a vertical 4:5 composition.\n"
+            )
         )
 
         images = [
