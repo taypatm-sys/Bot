@@ -221,6 +221,15 @@ def _build_check_report(
                     ("Готово", ready_references),
                     ("Автозамен", repository.get_setting("last_mockup_reference_replacements") or "0"),
                     ("Поиск", repository.get_setting("pinterest_discovery_status") or "выключен"),
+                    (
+                        "По товару",
+                        "найдено "
+                        f"{repository.get_setting('last_pinterest_product_discovered') or '0'}, "
+                        "обработано "
+                        f"{repository.get_setting('last_pinterest_product_processed') or '0'}, "
+                        "подготовлено "
+                        f"{repository.get_setting('last_pinterest_product_prepared') or '0'}",
+                    ),
                 ],
             ),
         ]
@@ -1582,21 +1591,105 @@ def build_router(
                 garment_type=spec.garment_type if spec else None,
                 exclude_labels=used_labels,
             )
-        await status_message.edit_text(
-            "Проверяю подготовленную базу референсов. Pinterest API не используется. "
-            "Платная генерация еще не запущена."
-        )
         dynamic_source_name = ""
-        search_links = reference_catalog.build_product_search_links(
-            garment_type=spec.garment_type,
-            target_gender=spec.target_gender,
-            moods=spec.moods,
-            print_side=spec.side,
-            shirt_color=spec.shirt_color,
-            fit=spec.fit,
-        )
         repository.set_setting("last_pinterest_product_discovered", "0")
         repository.set_setting("last_pinterest_product_processed", "0")
+        repository.set_setting("last_pinterest_product_prepared", "0")
+
+        if requested_generation_mode == "local":
+            if (
+                reference_catalog.pinterest_search_enabled
+                and reference_catalog.pinterest_access_token
+            ):
+                await status_message.edit_text(
+                    "Ищу в Pinterest референсы именно для этого товара: тип, пол, "
+                    "сторона принта, цвет и посадка. Генерация еще не запущена."
+                )
+                try:
+                    (
+                        dynamic_source_name,
+                        pinterest_added,
+                        pinterest_processed,
+                    ) = await asyncio.wait_for(
+                        reference_catalog.discover_for_product(
+                            garment_type=spec.garment_type,
+                            target_gender=spec.target_gender,
+                            moods=spec.moods,
+                            print_side=spec.side,
+                            shirt_color=spec.shirt_color,
+                            fit=spec.fit,
+                            import_now=3,
+                        ),
+                        timeout=300.0,
+                    )
+                    repository.set_setting(
+                        "last_pinterest_product_discovered", str(pinterest_added)
+                    )
+                    repository.set_setting(
+                        "last_pinterest_product_processed", str(pinterest_processed)
+                    )
+                    pinterest_prepared = 0
+                    if pinterest_processed:
+                        await status_message.edit_text(
+                            "Pinterest нашел новые фото. Подготавливаю два лучших "
+                            "референса для бесплатной локальной замены принта."
+                        )
+                        pinterest_prepared = await asyncio.wait_for(
+                            reference_catalog.prepare_best_simple_candidates(
+                                garment_type=spec.garment_type,
+                                target_gender=spec.target_gender,
+                                moods=spec.moods,
+                                print_side=spec.side,
+                                shirt_color=spec.shirt_color,
+                                fit=spec.fit,
+                                limit=2,
+                            ),
+                            timeout=300.0,
+                        )
+                    repository.set_setting(
+                        "last_pinterest_product_prepared", str(pinterest_prepared)
+                    )
+                    repository.set_setting(
+                        "pinterest_discovery_status",
+                        "поиск по товару: "
+                        f"найдено {pinterest_added}, обработано {pinterest_processed}, "
+                        f"подготовлено {pinterest_prepared}",
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Автопоиск Pinterest для локальной генерации не выполнен: %s",
+                        error,
+                    )
+                    repository.set_setting(
+                        "pinterest_discovery_status",
+                        f"ошибка поиска по товару: {str(error)[:160]}",
+                    )
+                    repository.set_setting(
+                        "last_mockup_error",
+                        f"Pinterest: {type(error).__name__}: {str(error)[:500]}",
+                    )
+                    await status_message.edit_text(
+                        "Pinterest не вернул новые референсы. Проверяю уже сохраненную "
+                        "базу. Локальная генерация еще не запущена."
+                    )
+            else:
+                reason = (
+                    "нет PINTEREST_ACCESS_TOKEN"
+                    if not reference_catalog.pinterest_access_token
+                    else "PINTEREST_SEARCH_ENABLED=false"
+                )
+                repository.set_setting(
+                    "pinterest_discovery_status", f"автопоиск неактивен: {reason}"
+                )
+                await status_message.edit_text(
+                    "Проверяю сохраненную базу референсов. Автопоиск Pinterest "
+                    f"неактивен: {reason}."
+                )
+        else:
+            await status_message.edit_text(
+                "Проверяю подготовленную базу референсов. Платная генерация еще "
+                "не запущена."
+            )
 
         generated_file_ids: list[str] = []
         generation_error: str | None = None

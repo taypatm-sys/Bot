@@ -281,6 +281,18 @@ class Config:
             raise ConfigError("CONTACT_USERNAME указан неверно")
 
         database_url = normalize_database_url(os.getenv("DATABASE_URL", ""))
+        pinterest_access_token = os.getenv("PINTEREST_ACCESS_TOKEN", "").strip()
+        pinterest_enabled_raw = os.getenv("PINTEREST_SEARCH_ENABLED")
+        if pinterest_enabled_raw is None or not pinterest_enabled_raw.strip():
+            # Supplying a Pinterest token is enough to enable automatic search.
+            # An explicit false value still disables it.
+            pinterest_search_enabled = bool(pinterest_access_token)
+        else:
+            pinterest_search_enabled = _bool_env(
+                "PINTEREST_SEARCH_ENABLED",
+                pinterest_enabled_raw,
+                default=bool(pinterest_access_token),
+            )
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -380,12 +392,8 @@ class Config:
                 os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.3").strip()
                 or "TaypaReferenceCatalog/5.3"
             ),
-            pinterest_access_token=os.getenv("PINTEREST_ACCESS_TOKEN", "").strip(),
-            pinterest_search_enabled=_bool_env(
-                "PINTEREST_SEARCH_ENABLED",
-                os.getenv("PINTEREST_SEARCH_ENABLED", "false"),
-                default=False,
-            ),
+            pinterest_access_token=pinterest_access_token,
+            pinterest_search_enabled=pinterest_search_enabled,
             pinterest_country_code=(
                 os.getenv("PINTEREST_COUNTRY_CODE", "US").strip().upper() or "US"
             ),
