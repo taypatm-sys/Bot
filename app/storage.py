@@ -140,7 +140,7 @@ def _row_to_reference_asset(row: Mapping[str, Any]) -> ReferenceAsset:
 
 
 class PostRepository:
-    """Queue storage with PostgreSQL support and an optional SQLite fallback."""
+    """Queue storage backed by PostgreSQL or explicit local SQLite."""
 
     def __init__(
         self,
@@ -159,8 +159,6 @@ class PostRepository:
 
     @property
     def backend_name(self) -> str:
-        if self._was_fallback:
-            return "SQLite (автоматический резерв при ошибке PostgreSQL)"
         return "PostgreSQL" if self.database_url else "SQLite"
 
     @property
@@ -168,29 +166,15 @@ class PostRepository:
         return bool(self.database_url)
 
     def _fallback_to_sqlite(self, reason: str) -> None:
-        import logging
-
-        if not self.allow_sqlite_fallback:
-            raise RuntimeError(
-                "PostgreSQL недоступен. Автоматический переход на SQLite отключен, "
-                "чтобы Railway не потерял данные на временном диске. "
-                f"Причина: {reason}"
-            )
-        logging.getLogger(__name__).warning(
-            "⚠️ Ошибка подключения к PostgreSQL (%s). "
-            "Разрешен переход на локальную SQLite.",
-            reason,
+        # Never downgrade a configured PostgreSQL deployment to SQLite. On
+        # Railway the local filesystem is temporary, and a fallback also makes
+        # the cross-server Telegram polling lock ineffective. Failing fast is
+        # safer than appearing healthy while losing data.
+        raise RuntimeError(
+            "PostgreSQL недоступен. Бот остановлен без перехода на SQLite. "
+            "Проверьте DATABASE_URL и параметр sslmode. "
+            f"Причина: {reason}"
         )
-        if self._pool is not None:
-            try:
-                self._pool.close()
-            except Exception:
-                pass
-            self._pool = None
-        self.database_url = ""
-        self._was_fallback = True
-        if self.path is None:
-            self.path = Path("posts.sqlite3")
 
     def _ensure_pool(self) -> None:
         if not self.database_url or self._pool is not None:
@@ -232,10 +216,8 @@ class PostRepository:
                     with self._pool.connection(timeout=10) as connection:
                         yield connection
                     return
-            except Exception as error:
-                if not self.allow_sqlite_fallback:
-                    raise
-                self._fallback_to_sqlite(str(error))
+            except Exception:
+                raise
 
         if self.path is None:
             self.path = Path("posts.sqlite3")
@@ -257,6 +239,44 @@ class PostRepository:
         params: Sequence[Any] = (),
     ) -> Any:
         return connection.execute(self._sql(query), tuple(params))
+
+    def _repair_legacy_sqlite_ids(self, connection: sqlite3.Connection) -> None:
+        """Repair databases once created with PostgreSQL-style BIGSERIAL IDs.
+
+        Older fallback builds could create SQLite tables whose ``id`` column was
+        declared as BIGSERIAL PRIMARY KEY. SQLite does not auto-populate such a
+        column, so rows were stored with ``id = NULL``. Backfill from rowid and
+        install a trigger so existing local databases remain usable.
+        """
+        tables = (
+            "scheduled_posts",
+            "reference_assets",
+            "reference_usages",
+            "product_presets",
+            "generation_artifacts",
+            "reference_user_feedback",
+        )
+        for table in tables:
+            info = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            id_info = next((row for row in info if row["name"] == "id"), None)
+            if id_info is None:
+                continue
+            declared_type = str(id_info["type"] or "").upper()
+            if declared_type == "INTEGER" and int(id_info["pk"] or 0) == 1:
+                continue
+            connection.execute(
+                f"UPDATE {table} SET id = rowid WHERE id IS NULL"
+            )
+            connection.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS trg_{table}_fill_legacy_id
+                AFTER INSERT ON {table}
+                WHEN NEW.id IS NULL
+                BEGIN
+                    UPDATE {table} SET id = NEW.rowid WHERE rowid = NEW.rowid;
+                END
+                """
+            )
 
     def initialize(self) -> None:
         if self.database_url:
@@ -475,6 +495,8 @@ class PostRepository:
                 )
                 """,
             )
+            if not self.database_url:
+                self._repair_legacy_sqlite_ids(connection)
 
     def _migrate_post_columns(self, connection: Any) -> None:
         definitions = {
@@ -1024,6 +1046,31 @@ class PostRepository:
             ).fetchone()
             if not row:
                 return None
+            row_id = row["id"]
+            if row_id is None:
+                # Corrupted legacy SQLite row. It cannot be claimed safely;
+                # leave a clear status instead of crashing the worker loop.
+                if not self.database_url:
+                    self._repair_legacy_sqlite_ids(connection)
+                    row = self._execute(
+                        connection,
+                        """
+                        SELECT id, source_url, resolved_image_url, image_bytes,
+                               image_mime_type, attempt_count
+                        FROM reference_assets
+                        WHERE status IN ('pending', 'retry')
+                          AND id IS NOT NULL
+                          AND (next_retry_at_utc IS NULL OR next_retry_at_utc <= ?)
+                        ORDER BY id ASC
+                        LIMIT 1
+                        """,
+                        (now,),
+                    ).fetchone()
+                    if not row:
+                        return None
+                    row_id = row["id"]
+                if row_id is None:
+                    return None
             cursor = self._execute(
                 connection,
                 """
@@ -1031,7 +1078,7 @@ class PostRepository:
                 SET status = 'processing', updated_at_utc = ?
                 WHERE id = ? AND status IN ('pending', 'retry')
                 """,
-                (now, int(row["id"])),
+                (now, int(row_id)),
             )
             if cursor.rowcount != 1:
                 return None
@@ -1598,6 +1645,7 @@ class PostRepository:
                 connection,
                 """
                 SELECT * FROM reference_assets
+                WHERE id IS NOT NULL
                 ORDER BY
                     CASE lifecycle_state
                         WHEN 'successful' THEN 0

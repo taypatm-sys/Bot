@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta, timezone as fixed_timezone, tzinfo
 from pathlib import Path
 from typing import Union
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -31,6 +32,59 @@ LEGACY_GEMINI_MODELS = {
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BUNDLED_CAPTION_TEMPLATE = PROJECT_ROOT / "caption_template.txt"
 BUNDLED_REFERENCE_SOURCES = PROJECT_ROOT / "reference_sources.txt"
+
+
+_ALLOWED_SSLMODES = {
+    "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
+}
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    clean = value.strip()
+    while len(clean) >= 2 and clean[0] in {"\"", "'"} and clean[-1] == clean[0]:
+        clean = clean[1:-1].strip()
+    return clean
+
+
+def normalize_database_url(value: str) -> str:
+    """Normalize common Railway/Neon paste errors without exposing credentials."""
+    raw = _strip_wrapping_quotes(value)
+    if not raw:
+        return ""
+    if not raw.startswith(("postgres://", "postgresql://")):
+        raise ConfigError("DATABASE_URL должен быть строкой подключения PostgreSQL")
+
+    # Railway RAW editor and copied Neon URLs are sometimes pasted with one or
+    # two stray quote characters at the end of sslmode=require. psycopg then
+    # receives values such as require"" and rejects the whole connection.
+    try:
+        parts = urlsplit(raw)
+    except ValueError as error:
+        raise ConfigError("DATABASE_URL имеет неверный формат") from error
+
+    if not parts.netloc or not parts.path:
+        raise ConfigError("DATABASE_URL не содержит адрес или имя базы")
+
+    normalized_query: list[tuple[str, str]] = []
+    for key, item in parse_qsl(parts.query, keep_blank_values=True):
+        clean_key = key.strip()
+        clean_value = item.strip().strip("\"'")
+        if clean_key.casefold() == "sslmode":
+            clean_value = clean_value.casefold()
+            if clean_value not in _ALLOWED_SSLMODES:
+                raise ConfigError(
+                    "В DATABASE_URL параметр sslmode должен быть require, "
+                    "verify-full, verify-ca, prefer, allow или disable"
+                )
+        normalized_query.append((clean_key, clean_value))
+
+    normalized = urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(normalized_query), parts.fragment)
+    )
+    # Also remove accidental trailing quotes when the URL has no query parser
+    # representation for them. This is safe because valid PostgreSQL URLs do
+    # not end with a literal quote.
+    return normalized.rstrip("\"'")
 
 
 def normalize_gemini_model(value: str) -> str:
@@ -226,11 +280,7 @@ class Config:
         if not contact_username.replace("_", "").isalnum():
             raise ConfigError("CONTACT_USERNAME указан неверно")
 
-        database_url = os.getenv("DATABASE_URL", "").strip()
-        if database_url and not database_url.startswith(
-            ("postgres://", "postgresql://")
-        ):
-            raise ConfigError("DATABASE_URL должен быть строкой подключения PostgreSQL")
+        database_url = normalize_database_url(os.getenv("DATABASE_URL", ""))
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -250,10 +300,17 @@ class Config:
                 os.getenv("CAPTION_TEMPLATE_PATH", "caption_template.txt")
             ),
             database_url=database_url,
-            allow_sqlite_fallback=_bool_env(
-                "ALLOW_SQLITE_FALLBACK",
-                os.getenv("ALLOW_SQLITE_FALLBACK", "false"),
-                default=False,
+            # A configured PostgreSQL database must never silently switch to
+            # Railway's temporary SQLite disk. Such a fallback loses data and
+            # also disables the cross-server polling lock.
+            allow_sqlite_fallback=(
+                False
+                if database_url
+                else _bool_env(
+                    "ALLOW_SQLITE_FALLBACK",
+                    os.getenv("ALLOW_SQLITE_FALLBACK", "false"),
+                    default=False,
+                )
             ),
             admin_telegram_ids=admin_ids,
             gemini_image_model=(

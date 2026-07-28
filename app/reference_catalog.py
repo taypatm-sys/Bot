@@ -412,6 +412,7 @@ class ReferenceCatalog:
 
     async def run(self) -> None:
         self.repository.set_setting("simple_worker_status", "запущен")
+        consecutive_errors = 0
         while not self._stop_event.is_set():
             self._wake_event.clear()
             try:
@@ -444,19 +445,27 @@ class ReferenceCatalog:
                     "simple_worker_status", "обработал задачу" if processed else "ожидает"
                 )
                 self.repository.set_setting("simple_worker_last_error", "")
+                consecutive_errors = 0
                 delay = (
                     self.import_delay_seconds if processed else self.idle_interval_seconds
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                logger.exception("Фоновый обработчик референсов не остановлен после ошибки")
-                self.repository.set_setting("simple_worker_status", "ошибка, перезапуск")
+                consecutive_errors += 1
+                delay = min(300.0, 10.0 * (2 ** min(consecutive_errors - 1, 5)))
+                logger.exception(
+                    "Ошибка фонового обработчика референсов. Повтор через %.0f секунд",
+                    delay,
+                )
+                self.repository.set_setting(
+                    "simple_worker_status",
+                    f"ошибка, повтор через {int(delay)} сек",
+                )
                 self.repository.set_setting("simple_worker_current_reference", "0")
                 self.repository.set_setting(
                     "simple_worker_last_error", str(error)[:500]
                 )
-                delay = 10.0
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
