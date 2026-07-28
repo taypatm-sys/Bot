@@ -29,6 +29,66 @@ from app.storage import PostRepository
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
+
+_SOFT_GENERATIVE_REFERENCE_TERMS = (
+    "существующ",
+    "старый принт",
+    "крупный принт",
+    "чужой принт",
+    "принт превышает",
+    "логотип",
+    "надпись",
+    "цепоч",
+    "цепь",
+    "ожерель",
+    "кулон",
+    "подвеск",
+    "касаются плеч",
+    "касается плеч",
+    "верхней части футболки",
+    "existing print",
+    "large print",
+    "logo",
+    "graphic",
+    "necklace",
+    "chain",
+    "pendant",
+    "touching the shoulders",
+)
+
+_HARD_GENERATIVE_REFERENCE_TERMS = (
+    "не видна",
+    "не видно",
+    "нечитаем",
+    "неправильная сторона",
+    "сторона не подходит",
+    "ракурс не подходит",
+    "лежит",
+    "полулеж",
+    "толпа",
+    "коллаж",
+    "полностью закры",
+    "сильно закры",
+    "закрывает большую часть",
+    "wrong side",
+    "unreadable",
+    "lying down",
+    "reclining",
+    "crowd",
+    "collage",
+    "fully covered",
+    "severely obscured",
+)
+
+
+def _is_soft_generative_rejection(reason: str) -> bool:
+    clean = (reason or "").casefold()
+    if not clean:
+        return False
+    if any(term in clean for term in _HARD_GENERATIVE_REFERENCE_TERMS):
+        return False
+    return any(term in clean for term in _SOFT_GENERATIVE_REFERENCE_TERMS)
+
 GarmentTag = Literal[
     "t-shirt",
     "hoodie",
@@ -1795,6 +1855,7 @@ class ReferenceCatalog:
         print_width_percent: int = 30,
         print_height_percent: int = 30,
         print_top_offset_percent: int = 15,
+        allow_generative_reconstruction: bool = False,
     ) -> ReferenceCompatibility:
         return await asyncio.to_thread(
             self._validate_reference_for_generation_sync,
@@ -1807,6 +1868,7 @@ class ReferenceCatalog:
             print_width_percent,
             print_height_percent,
             print_top_offset_percent,
+            allow_generative_reconstruction,
         )
 
     def _validate_reference_for_generation_sync(
@@ -1820,10 +1882,16 @@ class ReferenceCatalog:
         print_width_percent: int,
         print_height_percent: int,
         print_top_offset_percent: int,
+        allow_generative_reconstruction: bool,
     ) -> ReferenceCompatibility:
         prompt = (
-            "This is a strict preflight check for a clothing mockup. "
-            f"The target product is a {target_shirt_color or 'same-color'} "
+            "This is a preflight check for a clothing mockup. "
+            + (
+                "The final paid image model will fully reconstruct the garment. Treat an existing print, logo, chain, necklace, pendant, or hands merely touching the shoulders/upper garment as SOFT issues and keep compatible=true when the required side and camera angle are visible and print_area_visibility is at least 45%. Only reject severe obstructions, wrong side/angle, unreadable images, lying/reclining poses, or cases where most of the torso is hidden. "
+                if allow_generative_reconstruction
+                else "Use strict local-compositing rules. "
+            )
+            + f"The target product is a {target_shirt_color or 'same-color'} "
             f"{target_fit or ''} {garment_type} with a {print_side} print. "
             f"The source print uses about {print_width_percent}% of the garment width, "
             f"{print_height_percent}% of its height and begins about "
@@ -1832,10 +1900,13 @@ class ReferenceCatalog:
             "modify the garment color and fit during final image generation. "
             "Judge compatibility purely on pose clarity, camera angle, and an unobstructed garment panel. "
             "For a back print, the back must be clearly visible from rear or "
-            "rear three-quarter view. For a front print, the front panel must be clearly "
-            "visible and free of long hanging necklaces, pendants or chains hanging down over the chest print area. "
-            "Reject photos where an outer jacket, zip-up hoodie, sweater or cardigan covers/overlaps the sides of the t-shirt panel, "
-            "where hands/fingers hold, pull, or touch the chest panel, where the subject is lying down or reclining, or where lighting is dark and obscured. "
+            "rear three-quarter view. For a front print, the front panel must be clearly visible. "
+            + (
+                "Do not reject merely because of an existing graphic, necklace, chain, pendant, or hands touching shoulders/upper garment; the paid model will redraw them. "
+                if allow_generative_reconstruction
+                else "Reject long necklaces, pendants, chains, and hands/fingers holding, pulling, or touching the chest panel. "
+            )
+            + "Reject photos where an outer jacket, zip-up hoodie, sweater or cardigan covers most of the t-shirt panel, where the subject is lying down or reclining, or where lighting is dark and obscured. "
             "Reject completely unclear orientation, extreme full-body shots, severe "
             "crowd/collage obstructions, or unreadable images. Be reasonably permissive with minor wrist accessories "
             "or mild hair edge overlap, but strictly reject chest necklaces, bags, or hands "
@@ -1893,11 +1964,16 @@ class ReferenceCatalog:
             if print_side == "back"
             else result.camera_angle != "rear"
         )
+        visibility_threshold = 45 if allow_generative_reconstruction else 55
+        soft_reconstruction_ok = (
+            allow_generative_reconstruction
+            and _is_soft_generative_rejection(result.reason)
+        )
         compatible = (
-            result.compatible
-            and side_ok
+            side_ok
             and angle_ok
-            and result.print_area_visibility >= 55
+            and result.print_area_visibility >= visibility_threshold
+            and (result.compatible or soft_reconstruction_ok)
         )
         quad_valid = len(result.target_print_quad) in {0, 4}
         existing_quad_valid = len(result.existing_print_quad) in {0, 4}
@@ -1970,9 +2046,9 @@ class ReferenceCatalog:
                 rejection_reasons.append(
                     f"ракурс '{angle_label}' не подходит для принта {print_side}"
                 )
-            if result.print_area_visibility < 55:
+            if result.print_area_visibility < visibility_threshold:
                 rejection_reasons.append(
-                    f"видимость зоны принта ({result.print_area_visibility}%) ниже 55%"
+                    f"видимость зоны принта ({result.print_area_visibility}%) ниже {visibility_threshold}%"
                 )
             if not result.compatible:
                 gemini_reason = (result.reason or "").strip()
@@ -1985,8 +2061,13 @@ class ReferenceCatalog:
                 if rejection_reasons
                 else "Сторона, ракурс или видимость зоны принта не подходят"
             )
+        elif soft_reconstruction_ok and not result.compatible:
+            updates["reason"] = (
+                "Подходит для платной генерации: старый принт или аксессуары будут "
+                "полностью перерисованы моделью ИИ"
+            )
         elif result.local_composite_safe and not local_safe:
-            updates["reason"] = "Референс подходит для Gemini, но не для локальной замены"
+            updates["reason"] = "Референс подходит для платной генерации, но не для локальной замены"
         return result.model_copy(update=updates)
 
     def status_text(self) -> str:

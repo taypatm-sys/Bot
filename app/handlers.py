@@ -1191,7 +1191,7 @@ def build_router(
         selected_compatibility = None
         selected_token = ""
         reject_reasons: list[str] = []
-        for attempt in range(1, 7):
+        for attempt in range(1, 13):
             token = f"preview:{message.chat.id}:{secrets.token_hex(5)}:{attempt}"
             candidate = reference_catalog.select_reference(
                 garment_type=spec.garment_type,
@@ -1218,6 +1218,7 @@ def build_router(
                         print_width_percent=spec.print_width_percent,
                         print_height_percent=spec.print_height_percent,
                         print_top_offset_percent=spec.print_top_offset_percent,
+                        allow_generative_reconstruction=True,
                     ),
                     timeout=120.0,
                 )
@@ -1622,7 +1623,8 @@ def build_router(
                 f"{len(directions)}. Платная генерация еще не запущена."
             )
 
-            for reference_attempt in range(1, 7):
+            reference_attempt_limit = 6 if requested_generation_mode == "local" else 12
+            for reference_attempt in range(1, reference_attempt_limit + 1):
                 use_confirmed = bool(
                     index == 1
                     and reference_attempt == 1
@@ -1699,6 +1701,9 @@ def build_router(
                             print_width_percent=spec.print_width_percent,
                             print_height_percent=spec.print_height_percent,
                             print_top_offset_percent=spec.print_top_offset_percent,
+                            allow_generative_reconstruction=(
+                                requested_generation_mode != "local"
+                            ),
                         ),
                         timeout=120.0,
                     )
@@ -1803,8 +1808,8 @@ def build_router(
                             )
                     else:
                         generation_error = (
-                            "Не найден референс с правильной стороной и открытой зоной "
-                            "принта. Генерация не запускалась."
+                            "Не найден даже ориентировочный референс с правильной стороной "
+                            "и читаемой позой. Проверено до 12 вариантов. Генерация не запускалась."
                         )
                 break
 
