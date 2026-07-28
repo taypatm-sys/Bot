@@ -1230,39 +1230,20 @@ def build_model_photo_prompt(
         )
 
     if is_cap:
-        product_physics = (
-            "CAP-SPECIFIC DTF PHYSICS:\n"
-            "- This is a real DTF heat-transfer film on a curved cap panel, not "
-            "embroidery, woven thread, a patch, vinyl lettering or a floating label.\n"
-            "- Keep the cap's real crown construction visible: the center vertical "
-            "panel seam, rows of stitching on the brim, panel joins and eyelets. Do "
-            "not erase or exaggerate them.\n"
-            "- If the source print crosses the center seam, the DTF film follows the "
-            "small raised seam ridge. Show a subtle vertical change in curvature and "
-            "tiny local waviness through the printed area, while all letters and "
-            "artwork remain readable and aligned.\n"
-            "- The film has a very mild satin surface response and conforms to the "
-            "rounded crown. It is never perfectly flat and never turns into raised "
-            "embroidered fibers.\n"
+        return _build_cap_photo_prompt(
+            spec=spec,
+            direction=direction,
+            request_token=request_token,
+            measurements=measurements,
+            source_rule=source_rule,
+            has_style_reference=has_style_reference,
+            has_separate_print=has_separate_print,
+            has_source_detail=has_source_detail,
+            reference_direction=reference_direction,
+            style_reference_tags=style_reference_tags or {},
         )
-        if has_style_reference:
-            composition = (
-                "- For this cap shot, follow the reference crop exactly. Do not require the "
-                "entire head, face or torso to be visible. Keep the full printed cap panel readable "
-                "only to the same extent as in the reference.\n"
-                "- Match the reference brim angle, crown perspective, head tilt and face occlusion. "
-                "The face may remain completely hidden. Do not turn the result into a face-forward portrait.\n"
-            )
-        else:
-            composition = (
-                "- Use the requested close or seated direction. Frame the full crown, "
-                "brim and printed front panel safely inside the vertical 4:5 image. The "
-                "rest of the person may be cropped naturally.\n"
-                "- The cap must look worn normally on a real head, with believable brim "
-                "shadow and hair interaction. Do not create a catalog cutout or product "
-                "floating alone unless the supplied source itself is only a product shot.\n"
-            )
-    else:
+
+    if not is_cap:
         product_physics = (
             "REAL DTF ON CLOTHING & FABRIC INTEGRATION:\n"
             "- FABRIC FOLD & CONTOUR CONFORMITY: The artwork is NOT a flat 2D sticker or digital overlay! "
@@ -1400,6 +1381,131 @@ def build_model_photo_prompt(
         "- The product and print remain readable without looking staged. No collage, split screen, "
         "mockup board, border, caption, watermark or extra graphic.\n"
         f"{variation_rule}"
+    )
+
+
+def _build_cap_photo_prompt(
+    *,
+    spec: Optional[MockupSpec],
+    direction: PhotoDirection,
+    request_token: str,
+    measurements: str,
+    source_rule: str,
+    has_style_reference: bool,
+    has_separate_print: bool,
+    has_source_detail: bool,
+    reference_direction: str,
+    style_reference_tags: dict[str, object],
+) -> str:
+    reference_framing = str(style_reference_tags.get("framing", "")).strip()
+    reference_angle = str(style_reference_tags.get("camera_angle", "")).strip()
+    reference_setting = str(style_reference_tags.get("setting", "")).strip()
+    reference_face_visibility = str(style_reference_tags.get("face_visibility", "")).strip()
+    reference_head_direction = str(style_reference_tags.get("head_direction", "")).strip()
+    reference_face_occlusion = str(style_reference_tags.get("face_occlusion", "")).strip()
+    reference_shot_character = str(style_reference_tags.get("shot_character", "")).strip()
+    reference_notes = str(style_reference_tags.get("composition_notes", "")).strip()
+    source_kind = (
+        "Image 3"
+        if has_style_reference and (has_separate_print or has_source_detail)
+        else "Image 2"
+        if has_style_reference
+        else "the generated camera setup"
+    )
+    intended_gender = spec.target_gender if spec else direction.gender
+    cap_product_rules = (
+        "STRICT CAP PRODUCT TRANSFER:\n"
+        "- Transfer the cap from the source product exactly: same cap category, crown height, "
+        "wash, color family, stitch pattern, seam layout, eyelets and curved brim character.\n"
+        "- Keep the front panel construction visible. The center seam, vertical panel shape, "
+        "top button, eyelets and brim stitching must remain realistic and must not be erased by the print.\n"
+        "- This is a real DTF transfer applied to a curved cap panel, not embroidery, woven thread, "
+        "screen text floating on top, a badge, a patch, vinyl sticker or metallic foil.\n"
+        "- The artwork must follow the crown curvature and, if necessary, subtly follow the raised center seam. "
+        "Keep all letters and illustration details readable while preserving realistic cap geometry.\n"
+        "- Preserve the exact print scale from the product source. Do not enlarge the print merely because the cap is closer to camera.\n"
+        "- Keep the artwork centered on the front crown panel unless Image 1 clearly places it elsewhere.\n"
+    )
+    if has_style_reference:
+        composition_lock = (
+            "CAP REFERENCE COMPOSITION LOCK - HIGHEST PRIORITY:\n"
+            f"- {source_kind} is the composition-locked base shot. Treat it as a direct edit target conceptually, even though you are generating a new final image.\n"
+            "- Preserve the same crop, framing, head size in frame, head tilt, brim angle, cap orientation, face visibility, face occlusion, glasses visibility, hair silhouette, neck visibility, shoulders and background structure.\n"
+            "- Only the cap and the immediate contact area around it may change to fit the transferred source cap naturally.\n"
+            "- Do not beautify the person, do not reveal hidden eyes, do not turn the result into a portrait and do not restage the scene as a fashion campaign.\n"
+            "- Keep the cap size relative to the head the same as in the reference. Do not make the cap larger, taller or more front-facing than in the reference.\n"
+            "- Preserve ordinary phone-photo realism, casual imperfections, clutter and candid framing from the reference.\n"
+            f"- Reference tags: framing={reference_framing or 'use the image'}, angle={reference_angle or 'use the image'}, setting={reference_setting or 'use the image'}, face_visibility={reference_face_visibility or 'read directly from image'}, head_direction={reference_head_direction or 'read directly from image'}, shot_character={reference_shot_character or 'read directly from image'}.\n"
+            + (f"- Face occlusion note: {reference_face_occlusion}.\n" if reference_face_occlusion else "")
+            + (f"- Composition note: {reference_notes}.\n" if reference_notes else "")
+        )
+        direction_details = (
+            "- Ignore any alternative scene, crop or pose suggestions. The visible reference image fully overrides them.\n"
+            f"- Generate a different fictional adult only where identity is visible, and keep the intended audience at {intended_gender}.\n"
+            f"- Variation token: {request_token}-{direction.seed}. Use it only for invisible or minor fictional identity details that do not change composition.\n"
+        )
+        realism_direction = (
+            "REFERENCE-MATCHED CAP REALISM:\n"
+            "- Match the reference's smartphone-photo character, exposure, softness, white balance, background blur and candid imperfection.\n"
+            "- The final image must feel like the same moment as the reference, with only the cap replaced.\n\n"
+        )
+        safe_area_direction = (
+            "- Keep the same asymmetric crop and subject placement as the reference. Do not zoom out just to show more of the head or torso.\n"
+            "- The cap front panel and artwork must remain readable only to the same extent as in the reference.\n"
+        )
+    else:
+        composition_lock = (
+            "CAP COMPOSITION WITHOUT STYLE REFERENCE:\n"
+            "- Create a believable close or mid-close everyday cap photo with the cap worn naturally on a real head.\n"
+            "- Keep the scene simple and product-focused. Avoid crowds, busy public scenes and multi-person compositions.\n"
+            "- The full front crown panel and print should be visible inside a vertical 4:5 frame, while the rest of the person may crop naturally.\n"
+        )
+        direction_details = (
+            f"- Location: {direction.setting}.\n"
+            f"- Action: {direction.pose}.\n"
+            f"- Camera: {direction.camera}.\n"
+            f"- Framing: {direction.framing}.\n"
+            f"- Light: {direction.light}.\n"
+            f"- Wearer intent: {intended_gender}.\n"
+            f"- Variation token: {request_token}-{direction.seed}. Use it only to make this everyday moment unique.\n"
+        )
+        realism_direction = (
+            "EVERYDAY CAP PHOTO REALISM:\n"
+            "- Use natural photographic perspective, realistic skin and hair texture, believable brim shadow and authentic casual styling.\n"
+            "- Avoid studio perfection, glossy catalog lighting and polished AI fashion-shoot aesthetics.\n\n"
+        )
+        safe_area_direction = (
+            "- Keep the cap and print comfortably inside the 4:5 frame. The brim and front panel must remain readable without looking staged.\n"
+        )
+
+    return (
+        "Create one believable everyday smartphone photograph for a real cap product post. "
+        "This is a strict reference-based cap mockup task. The product source is authoritative for the cap itself and its artwork. "
+        "Ignore only the mockup presentation background, watermarks and non-product decoration outside the physical cap.\n\n"
+        "IMAGE ROLE CONTRACT:\n"
+        f"0. {source_rule}\n"
+        "1. If a photographic shot reference is present, it is the composition anchor. Reconstruct the same shot before replacing the cap.\n"
+        "2. Replace only the cap product and its artwork. Do not redesign the person, pose or background.\n"
+        "3. Remove every trace of the reference cap's original text, logo or artwork before applying the transferred design. No ghost lettering may remain.\n"
+        "4. Preserve the final image as a real-life candid photo, not a studio mockup.\n\n"
+        "LOCKED CAP ARTWORK:\n"
+        "- Transfer the source artwork with maximum fidelity. Preserve every visible letter, line, ornament, figure, spacing, contour, color relationship and aspect ratio.\n"
+        "- Do not redraw, rewrite, translate, simplify, crop, extend, omit or invent any part of the artwork.\n"
+        "- If a separate high-resolution print image is supplied, it is the master source for every artwork pixel.\n"
+        "- Keep empty space around isolated artwork transparent so the cap fabric remains visible. Never invent a rectangular backing or patch unless the source design itself contains it.\n"
+        f"- {measurements}\n\n"
+        f"{cap_product_rules}\n"
+        f"{composition_lock}\n"
+        f"{reference_direction}\n"
+        "REAL PHOTO DIRECTION:\n"
+        f"- Wearer: {direction.person}.\n"
+        f"{direction_details}"
+        f"{realism_direction}"
+        "FORMAT AND OUTPUT RULES:\n"
+        "- Vertical 4:5 image for Telegram and social media.\n"
+        f"{safe_area_direction}"
+        "- No collage, no split screen, no floating product cutout, no border, no watermark and no extra caption.\n"
+        "- The final image must look like the reference shot with the source cap convincingly transferred onto it.\n"
     )
 
 
