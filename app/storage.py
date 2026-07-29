@@ -989,6 +989,37 @@ class PostRepository:
             json.dumps(labels[-max(1, limit) :], ensure_ascii=False),
         )
 
+    def get_recent_reference_ids(self, *, limit: int = 24) -> list[int]:
+        raw = self.get_setting("mockup_recent_reference_ids:v1")
+        if not raw:
+            return []
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(values, list):
+            return []
+        result: list[int] = []
+        for value in values:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                result.append(number)
+        return result[-max(1, limit) :]
+
+    def remember_reference_id(self, reference_id: int, *, limit: int = 24) -> None:
+        if reference_id <= 0:
+            return
+        values = self.get_recent_reference_ids(limit=limit)
+        values = [value for value in values if value != reference_id]
+        values.append(reference_id)
+        self.set_setting(
+            "mockup_recent_reference_ids:v1",
+            json.dumps(values[-max(1, limit) :], ensure_ascii=False),
+        )
+
     def enqueue_reference_urls(
         self,
         urls: Sequence[str],

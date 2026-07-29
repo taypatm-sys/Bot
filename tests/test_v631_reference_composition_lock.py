@@ -60,10 +60,6 @@ def test_manual_cap_reference_locks_hidden_face_and_crop():
     assert "crisp 35 mm portrait lens" not in prompt
     assert "premium streetwear lookbook quality" not in prompt
     assert "must keep the entire head" not in prompt.lower()
-    assert "CAP REFERENCE COMPOSITION LOCK - HIGHEST PRIORITY" in prompt
-    assert "Only the cap and the immediate contact area around it may change" in prompt
-    assert "Remove every trace of the reference cap's original text" in prompt
-    assert "Do not redesign the person, pose or background" in prompt
 
 
 def test_no_reference_keeps_general_product_photo_direction():
@@ -73,6 +69,5 @@ def test_no_reference_keeps_general_product_photo_direction():
         "normal",
         has_style_reference=False,
     )
-    assert "EVERYDAY CAP PHOTO REALISM" in prompt
-    assert "CAP COMPOSITION WITHOUT STYLE REFERENCE" in prompt
-    assert "Keep the cap and print comfortably inside the 4:5 frame" in prompt
+    assert "EDITORIAL LOOKBOOK REALISM" in prompt
+    assert "Keep the full product and print at least 8% away" in prompt

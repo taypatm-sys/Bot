@@ -642,3 +642,14 @@ Do not redeploy or restart Render while a paid image request is running. If a re
 - Reference status now reads only metadata and counters instead of downloading all image blobs from PostgreSQL.
 - Added immediate loading feedback, a 20-second timeout, visible error messages, and a Back to settings button.
 - The /references command and Refresh status action use the same non-blocking path.
+
+
+## V6.3.5 - product fidelity quality gate
+
+- Added a strict post-generation quality check before Telegram delivery.
+- The bot compares the generated photo with the source product, the separate print when supplied, and the photographic reference.
+- Bad results are blocked when the product type, print side, garment color, fit, silhouette, print fidelity, print scale or reference composition do not meet the configured threshold.
+- Added `/check` fields for overall quality, print fidelity, garment color, fit and the rejection reason.
+- Tightened automatic source-print detail crops so surrounding shirt fabric is not mistaken for artwork.
+- Preserved recent-reference cooldown and randomized near-equal candidates to reduce repeated references.
+- Added environment controls: `MOCKUP_POSTCHECK_ENABLED`, `MOCKUP_POSTCHECK_REQUIRED`, `MOCKUP_POSTCHECK_MIN_SCORE`, `MOCKUP_POSTCHECK_TIMEOUT_SECONDS`.

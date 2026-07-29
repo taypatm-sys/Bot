@@ -163,6 +163,38 @@ class PrintAssetSpec(BaseModel):
     analysis_confidence: int = Field(ge=0, le=100)
 
 
+class MockupQualityCheck(BaseModel):
+    overall_score: int = Field(ge=0, le=100)
+    product_type_match: bool
+    print_side_match: bool
+    garment_color_score: int = Field(ge=0, le=100)
+    garment_fit_score: int = Field(ge=0, le=100)
+    garment_silhouette_score: int = Field(ge=0, le=100)
+    print_fidelity_score: int = Field(ge=0, le=100)
+    print_scale_position_score: int = Field(ge=0, le=100)
+    reference_composition_score: int = Field(ge=0, le=100)
+    old_reference_artwork_removed: bool
+    unrequested_scene_changes: bool
+    reason: str = Field(min_length=1, max_length=800)
+    correction_instruction: str = Field(default="", max_length=1000)
+
+    def acceptable(self, *, minimum_score: int, has_separate_print: bool) -> bool:
+        required_print_score = 88 if has_separate_print else 80
+        return bool(
+            self.product_type_match
+            and self.print_side_match
+            and self.old_reference_artwork_removed
+            and not self.unrequested_scene_changes
+            and self.overall_score >= minimum_score
+            and self.garment_color_score >= 82
+            and self.garment_fit_score >= 78
+            and self.garment_silhouette_score >= 78
+            and self.print_fidelity_score >= required_print_score
+            and self.print_scale_position_score >= 80
+            and self.reference_composition_score >= 76
+        )
+
+
 def _clamp_int(value: float, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(round(value))))
 
@@ -530,8 +562,11 @@ def prepare_source_print_detail(
         y0 = box.y / 100.0 * height
         x1 = (box.x + box.width) / 100.0 * width
         y1 = (box.y + box.height) / 100.0 * height
-        pad_x = max(width * 0.08, (x1 - x0) * 0.55)
-        pad_y = max(height * 0.08, (y1 - y0) * 0.55)
+        # Keep the crop tightly focused on the artwork. Older versions used
+        # 55% padding, which let the generator treat surrounding shirt fabric as
+        # part of the print and often simplified or resized the design.
+        pad_x = max(8.0, (x1 - x0) * 0.10)
+        pad_y = max(8.0, (y1 - y0) * 0.10)
         crop_box = (
             max(0, int(x0 - pad_x)),
             max(0, int(y0 - pad_y)),
@@ -556,9 +591,16 @@ def prepare_source_print_detail(
     detail = image.crop(crop_box)
     if min(detail.size) < 180:
         return None
-    detail.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+    if max(detail.size) < 1800:
+        scale = min(4.0, 1800 / max(detail.size))
+        detail = detail.resize(
+            (max(1, int(detail.width * scale)), max(1, int(detail.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    else:
+        detail.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
     output = io.BytesIO()
-    detail.save(output, format="JPEG", quality=96, subsampling=0, optimize=True)
+    detail.save(output, format="JPEG", quality=98, subsampling=0, optimize=True)
     return output.getvalue()
 
 
@@ -1078,6 +1120,8 @@ def build_model_photo_prompt(
                 f"{spec.construction_details}. Do not use estimated numeric boxes. "
                 "Visually copy the exact print scale, center, top offset and placement "
                 "directly from Image 1. The visible product source is authoritative. "
+                "SILHOUETTE LOCK: keep the same apparent neckline width, shoulder drop, sleeve length, body width, hem length and overall fit as Image 1. "
+                "If Image 1 looks moderately oversized, do NOT turn it into an ultra-baggy editorial tee or a tighter fitted shirt. "
                 f"The intended wearer is {spec.target_gender}, target age group "
                 f"{spec.target_age_group}. The artwork mood tags are "
                 f"{', '.join(spec.moods)}."
@@ -1103,7 +1147,9 @@ def build_model_photo_prompt(
                 f"- The print height is {spec.print_height_percent}% of the garment torso height.\n"
                 f"- Top offset is {spec.print_top_offset_percent}% below the neckline/collar.\n"
                 f"- Left offset is {spec.print_left_offset_percent}% of torso width, center at {spec.print_center_x_percent}%.\n"
-                f"Construction: {spec.construction_details}. The intended wearer is {spec.target_gender}, target age group {spec.target_age_group}. "
+                f"Construction: {spec.construction_details}. SILHOUETTE LOCK: preserve the same apparent neckline width, shoulder drop, sleeve length, body width, hem length and overall fit seen on Image 1. "
+                "Do NOT turn a moderate relaxed garment into an exaggerated oversized fashion tee, and do NOT slim it down either. "
+                f"The intended wearer is {spec.target_gender}, target age group {spec.target_age_group}. "
                 f"The artwork mood tags are {', '.join(spec.moods)}. "
                 "CRITICAL MANDATORY PRINT SCALE CONTRACT: Image 1 (Source Product) is the ABSOLUTE MASTER SOURCE for print size, scale, and placement on the model. "
                 "Visually inspect the print on Image 1: if the print spans wide across the shoulders/back/chest (filling 60-85% of the panel width), the print on the generated model MUST BE EQUALLY LARGE AND WIDE. "
@@ -1164,7 +1210,7 @@ def build_model_photo_prompt(
             "surface as clean blank fabric matching Image 1's color, then place Image 1's "
             "print on top at the EXACT SAME PROPORTIONAL SCALE as Image 1. Zero ghost traces, "
             "shadows, outlines, or remnants of the original Image 2 artwork may remain. "
-            "The final wearer must wear the exact product from Image 1."
+            "The final wearer must wear the exact product from Image 1. Never inherit the garment silhouette, fit, color balance, wash strength or print size from Image 2 if they conflict with Image 1."
         )
     else:
         source_rule = (
@@ -1230,20 +1276,39 @@ def build_model_photo_prompt(
         )
 
     if is_cap:
-        return _build_cap_photo_prompt(
-            spec=spec,
-            direction=direction,
-            request_token=request_token,
-            measurements=measurements,
-            source_rule=source_rule,
-            has_style_reference=has_style_reference,
-            has_separate_print=has_separate_print,
-            has_source_detail=has_source_detail,
-            reference_direction=reference_direction,
-            style_reference_tags=style_reference_tags or {},
+        product_physics = (
+            "CAP-SPECIFIC DTF PHYSICS:\n"
+            "- This is a real DTF heat-transfer film on a curved cap panel, not "
+            "embroidery, woven thread, a patch, vinyl lettering or a floating label.\n"
+            "- Keep the cap's real crown construction visible: the center vertical "
+            "panel seam, rows of stitching on the brim, panel joins and eyelets. Do "
+            "not erase or exaggerate them.\n"
+            "- If the source print crosses the center seam, the DTF film follows the "
+            "small raised seam ridge. Show a subtle vertical change in curvature and "
+            "tiny local waviness through the printed area, while all letters and "
+            "artwork remain readable and aligned.\n"
+            "- The film has a very mild satin surface response and conforms to the "
+            "rounded crown. It is never perfectly flat and never turns into raised "
+            "embroidered fibers.\n"
         )
-
-    if not is_cap:
+        if has_style_reference:
+            composition = (
+                "- For this cap shot, follow the reference crop exactly. Do not require the "
+                "entire head, face or torso to be visible. Keep the full printed cap panel readable "
+                "only to the same extent as in the reference.\n"
+                "- Match the reference brim angle, crown perspective, head tilt and face occlusion. "
+                "The face may remain completely hidden. Do not turn the result into a face-forward portrait.\n"
+            )
+        else:
+            composition = (
+                "- Use the requested close or seated direction. Frame the full crown, "
+                "brim and printed front panel safely inside the vertical 4:5 image. The "
+                "rest of the person may be cropped naturally.\n"
+                "- The cap must look worn normally on a real head, with believable brim "
+                "shadow and hair interaction. Do not create a catalog cutout or product "
+                "floating alone unless the supplied source itself is only a product shot.\n"
+            )
+    else:
         product_physics = (
             "REAL DTF ON CLOTHING & FABRIC INTEGRATION:\n"
             "- FABRIC FOLD & CONTOUR CONFORMITY: The artwork is NOT a flat 2D sticker or digital overlay! "
@@ -1362,7 +1427,9 @@ def build_model_photo_prompt(
         "3. Keep the exact source side, relative scale and placement. Never enlarge "
         "the print to make it more dramatic. Measure against the usable garment or "
         "cap panel, not the whole image canvas.\n"
-        "4. Match the product color, washed or clean finish, cut, seams and construction. "
+        "4. Match the product color, washed or clean finish, cut, seams and construction. Preserve the source garment silhouette and fit with very high fidelity. "
+        "If the source product is a flat catalog/mockup shirt, translate that SAME garment onto the wearer instead of redesigning the shirt. "
+        "Never simplify a complex source print into a smaller slogan-style mark, and never upscale a smaller source design into a huge poster block. "
         "People or faces printed inside the artwork remain only inside the print; the "
         "real wearer is a different fictional non-celebrity adult.\n"
         f"5. {measurements}\n\n"
@@ -1381,131 +1448,6 @@ def build_model_photo_prompt(
         "- The product and print remain readable without looking staged. No collage, split screen, "
         "mockup board, border, caption, watermark or extra graphic.\n"
         f"{variation_rule}"
-    )
-
-
-def _build_cap_photo_prompt(
-    *,
-    spec: Optional[MockupSpec],
-    direction: PhotoDirection,
-    request_token: str,
-    measurements: str,
-    source_rule: str,
-    has_style_reference: bool,
-    has_separate_print: bool,
-    has_source_detail: bool,
-    reference_direction: str,
-    style_reference_tags: dict[str, object],
-) -> str:
-    reference_framing = str(style_reference_tags.get("framing", "")).strip()
-    reference_angle = str(style_reference_tags.get("camera_angle", "")).strip()
-    reference_setting = str(style_reference_tags.get("setting", "")).strip()
-    reference_face_visibility = str(style_reference_tags.get("face_visibility", "")).strip()
-    reference_head_direction = str(style_reference_tags.get("head_direction", "")).strip()
-    reference_face_occlusion = str(style_reference_tags.get("face_occlusion", "")).strip()
-    reference_shot_character = str(style_reference_tags.get("shot_character", "")).strip()
-    reference_notes = str(style_reference_tags.get("composition_notes", "")).strip()
-    source_kind = (
-        "Image 3"
-        if has_style_reference and (has_separate_print or has_source_detail)
-        else "Image 2"
-        if has_style_reference
-        else "the generated camera setup"
-    )
-    intended_gender = spec.target_gender if spec else direction.gender
-    cap_product_rules = (
-        "STRICT CAP PRODUCT TRANSFER:\n"
-        "- Transfer the cap from the source product exactly: same cap category, crown height, "
-        "wash, color family, stitch pattern, seam layout, eyelets and curved brim character.\n"
-        "- Keep the front panel construction visible. The center seam, vertical panel shape, "
-        "top button, eyelets and brim stitching must remain realistic and must not be erased by the print.\n"
-        "- This is a real DTF transfer applied to a curved cap panel, not embroidery, woven thread, "
-        "screen text floating on top, a badge, a patch, vinyl sticker or metallic foil.\n"
-        "- The artwork must follow the crown curvature and, if necessary, subtly follow the raised center seam. "
-        "Keep all letters and illustration details readable while preserving realistic cap geometry.\n"
-        "- Preserve the exact print scale from the product source. Do not enlarge the print merely because the cap is closer to camera.\n"
-        "- Keep the artwork centered on the front crown panel unless Image 1 clearly places it elsewhere.\n"
-    )
-    if has_style_reference:
-        composition_lock = (
-            "CAP REFERENCE COMPOSITION LOCK - HIGHEST PRIORITY:\n"
-            f"- {source_kind} is the composition-locked base shot. Treat it as a direct edit target conceptually, even though you are generating a new final image.\n"
-            "- Preserve the same crop, framing, head size in frame, head tilt, brim angle, cap orientation, face visibility, face occlusion, glasses visibility, hair silhouette, neck visibility, shoulders and background structure.\n"
-            "- Only the cap and the immediate contact area around it may change to fit the transferred source cap naturally.\n"
-            "- Do not beautify the person, do not reveal hidden eyes, do not turn the result into a portrait and do not restage the scene as a fashion campaign.\n"
-            "- Keep the cap size relative to the head the same as in the reference. Do not make the cap larger, taller or more front-facing than in the reference.\n"
-            "- Preserve ordinary phone-photo realism, casual imperfections, clutter and candid framing from the reference.\n"
-            f"- Reference tags: framing={reference_framing or 'use the image'}, angle={reference_angle or 'use the image'}, setting={reference_setting or 'use the image'}, face_visibility={reference_face_visibility or 'read directly from image'}, head_direction={reference_head_direction or 'read directly from image'}, shot_character={reference_shot_character or 'read directly from image'}.\n"
-            + (f"- Face occlusion note: {reference_face_occlusion}.\n" if reference_face_occlusion else "")
-            + (f"- Composition note: {reference_notes}.\n" if reference_notes else "")
-        )
-        direction_details = (
-            "- Ignore any alternative scene, crop or pose suggestions. The visible reference image fully overrides them.\n"
-            f"- Generate a different fictional adult only where identity is visible, and keep the intended audience at {intended_gender}.\n"
-            f"- Variation token: {request_token}-{direction.seed}. Use it only for invisible or minor fictional identity details that do not change composition.\n"
-        )
-        realism_direction = (
-            "REFERENCE-MATCHED CAP REALISM:\n"
-            "- Match the reference's smartphone-photo character, exposure, softness, white balance, background blur and candid imperfection.\n"
-            "- The final image must feel like the same moment as the reference, with only the cap replaced.\n\n"
-        )
-        safe_area_direction = (
-            "- Keep the same asymmetric crop and subject placement as the reference. Do not zoom out just to show more of the head or torso.\n"
-            "- The cap front panel and artwork must remain readable only to the same extent as in the reference.\n"
-        )
-    else:
-        composition_lock = (
-            "CAP COMPOSITION WITHOUT STYLE REFERENCE:\n"
-            "- Create a believable close or mid-close everyday cap photo with the cap worn naturally on a real head.\n"
-            "- Keep the scene simple and product-focused. Avoid crowds, busy public scenes and multi-person compositions.\n"
-            "- The full front crown panel and print should be visible inside a vertical 4:5 frame, while the rest of the person may crop naturally.\n"
-        )
-        direction_details = (
-            f"- Location: {direction.setting}.\n"
-            f"- Action: {direction.pose}.\n"
-            f"- Camera: {direction.camera}.\n"
-            f"- Framing: {direction.framing}.\n"
-            f"- Light: {direction.light}.\n"
-            f"- Wearer intent: {intended_gender}.\n"
-            f"- Variation token: {request_token}-{direction.seed}. Use it only to make this everyday moment unique.\n"
-        )
-        realism_direction = (
-            "EVERYDAY CAP PHOTO REALISM:\n"
-            "- Use natural photographic perspective, realistic skin and hair texture, believable brim shadow and authentic casual styling.\n"
-            "- Avoid studio perfection, glossy catalog lighting and polished AI fashion-shoot aesthetics.\n\n"
-        )
-        safe_area_direction = (
-            "- Keep the cap and print comfortably inside the 4:5 frame. The brim and front panel must remain readable without looking staged.\n"
-        )
-
-    return (
-        "Create one believable everyday smartphone photograph for a real cap product post. "
-        "This is a strict reference-based cap mockup task. The product source is authoritative for the cap itself and its artwork. "
-        "Ignore only the mockup presentation background, watermarks and non-product decoration outside the physical cap.\n\n"
-        "IMAGE ROLE CONTRACT:\n"
-        f"0. {source_rule}\n"
-        "1. If a photographic shot reference is present, it is the composition anchor. Reconstruct the same shot before replacing the cap.\n"
-        "2. Replace only the cap product and its artwork. Do not redesign the person, pose or background.\n"
-        "3. Remove every trace of the reference cap's original text, logo or artwork before applying the transferred design. No ghost lettering may remain.\n"
-        "4. Preserve the final image as a real-life candid photo, not a studio mockup.\n\n"
-        "LOCKED CAP ARTWORK:\n"
-        "- Transfer the source artwork with maximum fidelity. Preserve every visible letter, line, ornament, figure, spacing, contour, color relationship and aspect ratio.\n"
-        "- Do not redraw, rewrite, translate, simplify, crop, extend, omit or invent any part of the artwork.\n"
-        "- If a separate high-resolution print image is supplied, it is the master source for every artwork pixel.\n"
-        "- Keep empty space around isolated artwork transparent so the cap fabric remains visible. Never invent a rectangular backing or patch unless the source design itself contains it.\n"
-        f"- {measurements}\n\n"
-        f"{cap_product_rules}\n"
-        f"{composition_lock}\n"
-        f"{reference_direction}\n"
-        "REAL PHOTO DIRECTION:\n"
-        f"- Wearer: {direction.person}.\n"
-        f"{direction_details}"
-        f"{realism_direction}"
-        "FORMAT AND OUTPUT RULES:\n"
-        "- Vertical 4:5 image for Telegram and social media.\n"
-        f"{safe_area_direction}"
-        "- No collage, no split screen, no floating product cutout, no border, no watermark and no extra caption.\n"
-        "- The final image must look like the reference shot with the source cap convincingly transferred onto it.\n"
     )
 
 
@@ -1851,6 +1793,121 @@ class MockupGenerator:
             "Сервис анализа временно не ответил. Макет сохранен. Нажмите «Повторить "
             "анализ», отправлять файл заново не нужно."
         )
+
+    async def validate_generated_variant(
+        self,
+        *,
+        source_image_bytes: bytes,
+        source_mime_type: str,
+        generated_image_bytes: bytes,
+        generated_mime_type: str,
+        spec: MockupSpec,
+        print_image_bytes: Optional[bytes] = None,
+        print_mime_type: Optional[str] = None,
+        reference_image_bytes: Optional[bytes] = None,
+        reference_mime_type: Optional[str] = None,
+    ) -> MockupQualityCheck:
+        return await asyncio.to_thread(
+            self._validate_generated_variant_sync,
+            source_image_bytes,
+            source_mime_type,
+            generated_image_bytes,
+            generated_mime_type,
+            spec,
+            print_image_bytes,
+            print_mime_type,
+            reference_image_bytes,
+            reference_mime_type,
+        )
+
+    def _validate_generated_variant_sync(
+        self,
+        source_image_bytes: bytes,
+        source_mime_type: str,
+        generated_image_bytes: bytes,
+        generated_mime_type: str,
+        spec: MockupSpec,
+        print_image_bytes: Optional[bytes],
+        print_mime_type: Optional[str],
+        reference_image_bytes: Optional[bytes],
+        reference_mime_type: Optional[str],
+    ) -> MockupQualityCheck:
+        source_small, source_small_mime = _prepare_lightweight_analysis_bytes(
+            source_image_bytes, max_dimension=1200
+        )
+        generated_small, generated_small_mime = _prepare_lightweight_analysis_bytes(
+            generated_image_bytes, max_dimension=1200
+        )
+        contents: list[object] = [
+            (
+                "Perform a strict quality-control comparison for a DTF clothing mockup. "
+                "Do not edit or generate an image. Image 1 is the authoritative source product. "
+                "The final image must preserve its exact product type, printed side, visible color, "
+                "wash, cut, fit, garment silhouette, print artwork, print scale and placement. "
+                "The photographic reference, when supplied, is authoritative only for scene, pose, "
+                "crop, camera, background and lighting. Score objectively from 0 to 100. "
+                "Set product_type_match and print_side_match false for any mismatch. "
+                "Set unrequested_scene_changes true when the final scene, pose, crop, person visibility, "
+                "background or camera differs materially from the reference. "
+                "Set old_reference_artwork_removed false if any logo, text or graphic from the reference "
+                "remains. Print fidelity means letters, faces inside artwork, ornament, colors, layout, "
+                "aspect ratio and all elements match the source. Do not reward a merely similar design. "
+                f"Expected product: {spec.garment_type}; side: {spec.side}; color: {spec.shirt_color}; "
+                f"fit: {spec.fit}; print width: {spec.print_width_percent}%; print height: "
+                f"{spec.print_height_percent}%; top offset: {spec.print_top_offset_percent}%. "
+                "Return a concise reason and a direct correction_instruction for the image generator."
+            ),
+            "IMAGE 1 - authoritative product source:",
+            types.Part.from_bytes(data=source_small, mime_type=source_small_mime),
+        ]
+        if print_image_bytes:
+            print_small, print_small_mime = _prepare_lightweight_analysis_bytes(
+                print_image_bytes, max_dimension=1200
+            )
+            contents.extend(
+                [
+                    "IMAGE 2 - exact master print. Every visible artwork detail must match this image:",
+                    types.Part.from_bytes(data=print_small, mime_type=print_small_mime),
+                ]
+            )
+        if reference_image_bytes:
+            reference_small, reference_small_mime = _prepare_lightweight_analysis_bytes(
+                reference_image_bytes, max_dimension=1200
+            )
+            contents.extend(
+                [
+                    "PHOTOGRAPHIC REFERENCE - scene and composition only:",
+                    types.Part.from_bytes(
+                        data=reference_small,
+                        mime_type=reference_small_mime,
+                    ),
+                ]
+            )
+        contents.extend(
+            [
+                "FINAL GENERATED IMAGE TO INSPECT:",
+                types.Part.from_bytes(
+                    data=generated_small,
+                    mime_type=generated_small_mime,
+                ),
+            ]
+        )
+        response = self.client.models.generate_content(
+            model=self.analysis_model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=MockupQualityCheck,
+            ),
+        )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, MockupQualityCheck):
+            return parsed
+        if parsed is not None:
+            return MockupQualityCheck.model_validate(parsed)
+        if response.text:
+            return MockupQualityCheck.model_validate_json(response.text)
+        raise RuntimeError("Gemini не вернул результат проверки готового изображения")
 
     async def generate_variant(
         self,

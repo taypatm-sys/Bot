@@ -191,6 +191,14 @@ def _build_check_report(
                     ("Итоговый формат", "1024x1280, 4:5"),
                     ("Качество", config.openai_image_quality),
                     ("Автоповторы API", "выключены"),
+                    (
+                        "Контроль результата",
+                        (
+                            f"включен, минимум {config.mockup_postcheck_min_score}/100"
+                            if config.mockup_postcheck_enabled
+                            else "выключен"
+                        ),
+                    ),
                 ],
             ),
             (
@@ -202,6 +210,11 @@ def _build_check_report(
                     ("Референс", last_reference_label),
                     ("Референс передан", repository.get_setting("last_mockup_reference_passed") or "-"),
                     ("Проверка", repository.get_setting("last_mockup_preflight_mode") or "-"),
+                    ("Точность", repository.get_setting("last_mockup_quality_score") or "-"),
+                    ("Принт", repository.get_setting("last_mockup_print_fidelity_score") or "-"),
+                    ("Цвет", repository.get_setting("last_mockup_color_score") or "-"),
+                    ("Крой", repository.get_setting("last_mockup_fit_score") or "-"),
+                    ("Причина QC", repository.get_setting("last_mockup_quality_reason") or "-"),
                     ("Request ID", repository.get_setting("last_openai_request_id") or "-"),
                     ("Ожидает отправки", pending_results),
                     ("Ошибка", repository.get_setting("last_mockup_error") or "-"),
@@ -1703,7 +1716,8 @@ def build_router(
             usage_token = ""
             reference_asset = None
             reference_compatibility = None
-            excluded_reference_ids: list[int] = []
+            recent_reference_ids = repository.get_recent_reference_ids(limit=18)
+            excluded_reference_ids: list[int] = list(recent_reference_ids)
             preflight_reasons: list[str] = []
             reference_replacements = 0
 
@@ -1768,6 +1782,14 @@ def build_router(
                         fit=spec.fit,
                     )
                 if candidate is None:
+                    if excluded_reference_ids and recent_reference_ids:
+                        excluded_reference_ids = [
+                            ref_id
+                            for ref_id in excluded_reference_ids
+                            if ref_id not in set(recent_reference_ids)
+                        ]
+                        recent_reference_ids = []
+                        continue
                     break
                 candidate_image_bytes = (
                     candidate.simple_image_bytes
@@ -2124,17 +2146,146 @@ def build_router(
                 repository.set_setting("last_mockup_error", error.user_message)
                 generation_error = error.user_message
                 break
-            repository.finish_reference_usage(usage_token, outcome="completed")
+            final_cost_usd = (
+                generated_photo.estimated_cost_usd
+                if generated_photo.estimated_cost_usd > 0
+                else estimated_cost_usd
+            )
             _record_generation_cost(
                 repository,
                 provider=generation_decision.provider_label_ru,
-                amount_usd=estimated_cost_usd,
+                amount_usd=final_cost_usd,
             )
+            repository.set_setting(
+                "last_generation_cost_source",
+                generated_photo.cost_source or "estimate",
+            )
+
+            quality_check = None
+            if config.mockup_postcheck_enabled and generation_decision.provider != "local":
+                repository.set_setting("last_mockup_status", "контроль качества")
+                await status_message.edit_text(
+                    "Изображение создано. Проверяю точность принта, цвета, кроя, "
+                    "стороны и соответствие референсу перед отправкой."
+                )
+                try:
+                    quality_check = await asyncio.wait_for(
+                        mockup_generator.validate_generated_variant(
+                            source_image_bytes=source_bytes,
+                            source_mime_type=source_mime_type,
+                            generated_image_bytes=generated_photo.data,
+                            generated_mime_type=generated_photo.mime_type,
+                            spec=spec,
+                            print_image_bytes=print_bytes,
+                            print_mime_type=print_mime_type,
+                            reference_image_bytes=reference_bytes_for_generation,
+                            reference_mime_type=reference_mime_for_generation,
+                        ),
+                        timeout=config.mockup_postcheck_timeout_seconds,
+                    )
+                    repository.set_setting(
+                        "last_mockup_quality_score", str(quality_check.overall_score)
+                    )
+                    repository.set_setting(
+                        "last_mockup_quality_reason", quality_check.reason[:1000]
+                    )
+                    repository.set_setting(
+                        "last_mockup_print_fidelity_score",
+                        str(quality_check.print_fidelity_score),
+                    )
+                    repository.set_setting(
+                        "last_mockup_color_score",
+                        str(quality_check.garment_color_score),
+                    )
+                    repository.set_setting(
+                        "last_mockup_fit_score",
+                        str(quality_check.garment_fit_score),
+                    )
+                except Exception as quality_error:
+                    logger.exception("Не удалось проверить готовое изображение")
+                    repository.set_setting("last_mockup_quality_score", "ошибка")
+                    repository.set_setting(
+                        "last_mockup_quality_reason", str(quality_error)[:1000]
+                    )
+                    if config.mockup_postcheck_required:
+                        repository.finish_reference_usage(
+                            usage_token, outcome="quality_check_failed"
+                        )
+                        repository.record_reference_result(
+                            reference_asset.id,
+                            success=False,
+                            match_score=reference_asset.last_match_score,
+                            reason="не удалось выполнить контроль готового изображения",
+                        )
+                        repository.set_setting(
+                            "last_mockup_status", "проверка результата недоступна"
+                        )
+                        repository.set_setting(
+                            "last_mockup_error",
+                            "Изображение создано, но автоматическая проверка точности не ответила.",
+                        )
+                        pending_name = (
+                            f"taypa_unchecked_{batch_id}_{index}."
+                            f"{generated_photo.extension}"
+                        )
+                        repository.save_generation_artifact(
+                            chat_id=message.chat.id,
+                            request_token=usage_token,
+                            provider=generation_decision.provider_label_ru,
+                            model=generation_decision.model,
+                            mime_type=generated_photo.mime_type,
+                            file_name=pending_name,
+                            image_bytes=generated_photo.data,
+                            caption=(
+                                "Изображение создано, но автоматическая проверка "
+                                "точности временно недоступна."
+                            ),
+                        )
+                        generation_error = (
+                            "Изображение сохранено, но не отправлено без проверки. "
+                            "Нажмите «Отправить готовый результат» для ручного просмотра."
+                        )
+                        break
+
+                if quality_check is not None and not quality_check.acceptable(
+                    minimum_score=config.mockup_postcheck_min_score,
+                    has_separate_print=bool(print_bytes),
+                ):
+                    repository.finish_reference_usage(
+                        usage_token, outcome="quality_rejected"
+                    )
+                    repository.record_reference_result(
+                        reference_asset.id,
+                        success=False,
+                        match_score=reference_asset.last_match_score,
+                        reason=(
+                            f"контроль качества {quality_check.overall_score}/100: "
+                            f"{quality_check.reason}"
+                        ),
+                    )
+                    repository.set_setting(
+                        "last_mockup_status", "результат отклонен проверкой"
+                    )
+                    repository.set_setting(
+                        "last_mockup_error", quality_check.reason[:1000]
+                    )
+                    generation_error = (
+                        "Готовое изображение не отправлено, потому что оно не прошло "
+                        f"контроль точности ({quality_check.overall_score}/100). "
+                        f"Причина: {quality_check.reason}"
+                    )
+                    break
+
+            repository.finish_reference_usage(usage_token, outcome="completed")
             repository.record_reference_result(
                 reference_asset.id,
                 success=True,
                 match_score=reference_asset.last_match_score,
-                reason="успешная генерация для текущего макета",
+                reason=(
+                    "успешная генерация и контроль качества"
+                    if quality_check is not None
+                    else "успешная генерация для текущего макета"
+                ),
             )
             repository.set_setting("last_mockup_status", "готово")
             repository.set_setting("last_mockup_error", "")
@@ -2142,17 +2293,6 @@ def build_router(
                 repository.set_setting(
                     "last_openai_request_completed_at", datetime.now(UTC).isoformat()
                 )
-            final_cost_usd = (
-                generated_photo.estimated_cost_usd
-                if generated_photo.estimated_cost_usd > 0
-                else estimated_cost_usd
-            )
-            # Replace the pre-request estimate with token usage when OpenAI returned it.
-            if abs(final_cost_usd - estimated_cost_usd) > 0.0000001:
-                previous_total = _setting_float(repository, "total_generation_cost_usd")
-                corrected_total = max(0.0, previous_total - estimated_cost_usd + final_cost_usd)
-                repository.set_setting("last_generation_cost_usd", f"{final_cost_usd:.6f}")
-                repository.set_setting("total_generation_cost_usd", f"{corrected_total:.6f}")
             if generation_decision.provider == "openai":
                 repository.set_setting(
                     "last_openai_request_id", generated_photo.provider_request_id or ""
@@ -2166,6 +2306,11 @@ def build_router(
                 f"{wearer_label.capitalize()}\n"
                 "Формат 4:5\n"
                 f"Стоимость генерации: {_format_usd(final_cost_usd)}"
+                + (
+                    f"\nКонтроль точности: {quality_check.overall_score}/100"
+                    if quality_check is not None
+                    else ""
+                )
             )
             file_name = f"taypa_model_{batch_id}_{index}.{generated_photo.extension}"
             artifact_id = repository.save_generation_artifact(
@@ -2207,6 +2352,8 @@ def build_router(
             repository.delete_generation_artifact(artifact_id)
             generated_file_ids.append(sent.photo[-1].file_id)
             used_labels.append(direction.label)
+            if reference_asset is not None:
+                repository.remember_reference_id(reference_asset.id, limit=24)
             repository.remember_mockup_direction(direction.label, limit=10)
 
         if not generated_file_ids:

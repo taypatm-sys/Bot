@@ -1515,12 +1515,15 @@ class ReferenceCatalog:
             return None
         scored.sort(key=lambda item: (-item[0], item[1].use_count, item[1].id))
         token = request_token or secrets.token_hex(12)
-        candidates = scored[: min(12, len(scored))]
-        if rng is not None and len(candidates) > 1:
+        chooser = rng or random.SystemRandom()
+        candidates = scored[: min(20, len(scored))]
+        if len(candidates) > 1:
             top_score = candidates[0][0]
-            near_equal = [item for item in candidates if top_score - item[0] <= 4]
-            rng.shuffle(near_equal)
-            candidates = near_equal + [item for item in candidates if item not in near_equal]
+            near_equal = [item for item in candidates if top_score - item[0] <= 8]
+            rest = [item for item in candidates if item not in near_equal]
+            chooser.shuffle(near_equal)
+            chooser.shuffle(rest)
+            candidates = near_equal + rest
         for score, asset, score_reasons in candidates:
             if self.repository.reserve_reference(
                 asset.id,

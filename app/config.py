@@ -25,6 +25,7 @@ DEFAULT_OPENAI_IMAGE_QUALITY = "medium"
 DEFAULT_OPENAI_IMAGE_COST_USD = 0.0
 DEFAULT_GEMINI_IMAGE_COST_USD = 0.0
 DEFAULT_MOCKUP_VARIANTS = 1
+DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE = 82
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
     "models/gemini-2.5-flash",
@@ -257,6 +258,10 @@ class Config:
     reference_min_pool_size: int = 20
     reference_analysis_timeout_seconds: float = 90.0
     mockup_analysis_timeout_seconds: float = 150.0
+    mockup_postcheck_enabled: bool = True
+    mockup_postcheck_required: bool = True
+    mockup_postcheck_min_score: int = DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE
+    mockup_postcheck_timeout_seconds: float = 120.0
     reference_user_agent: str = "TaypaReferenceCatalog/5.3"
     pinterest_access_token: str = ""
     pinterest_search_enabled: bool = False
@@ -387,6 +392,32 @@ class Config:
                 "MOCKUP_ANALYSIS_TIMEOUT_SECONDS",
                 os.getenv("MOCKUP_ANALYSIS_TIMEOUT_SECONDS", "150"),
                 150.0,
+            ),
+            mockup_postcheck_enabled=_bool_env(
+                "MOCKUP_POSTCHECK_ENABLED",
+                os.getenv("MOCKUP_POSTCHECK_ENABLED", "true"),
+                default=True,
+            ),
+            mockup_postcheck_required=_bool_env(
+                "MOCKUP_POSTCHECK_REQUIRED",
+                os.getenv("MOCKUP_POSTCHECK_REQUIRED", "true"),
+                default=True,
+            ),
+            mockup_postcheck_min_score=min(
+                100,
+                _positive_int(
+                    "MOCKUP_POSTCHECK_MIN_SCORE",
+                    os.getenv(
+                        "MOCKUP_POSTCHECK_MIN_SCORE",
+                        str(DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE),
+                    ),
+                    DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE,
+                ),
+            ),
+            mockup_postcheck_timeout_seconds=_positive_float(
+                "MOCKUP_POSTCHECK_TIMEOUT_SECONDS",
+                os.getenv("MOCKUP_POSTCHECK_TIMEOUT_SECONDS", "120"),
+                120.0,
             ),
             reference_user_agent=(
                 os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.3").strip()
