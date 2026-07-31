@@ -4,7 +4,6 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
-from app.admin_control import admin_router
 from app.ai_assistant import AIAssistant
 from app.analysis_coordinator import AnalysisCoordinator
 from app.local_mockup_generator import LocalMockupGenerator
@@ -143,11 +142,6 @@ async def main() -> None:
     )
 
     dispatcher = Dispatcher()
-    dispatcher.workflow_data.update(
-        config=config,
-        repository=repository,
-    )
-    dispatcher.include_router(admin_router)
     dispatcher.include_router(
         build_router(
             config=config,
@@ -182,15 +176,6 @@ async def main() -> None:
         await bot.set_my_commands(
             [
                 BotCommand(command="start", description="Главное меню"),
-                BotCommand(command="admin", description="⚙️ Управление ботом"),
-                BotCommand(command="sysinfo", description="📊 Статус системы"),
-                BotCommand(command="findphoto", description="🖼 Поиск фото в сети"),
-                BotCommand(command="sendphoto", description="📥 Отправить фото по URL"),
-                BotCommand(command="exec", description="⚡ Выполнить Python код"),
-                BotCommand(command="cmd", description="💻 Выполнить команду ОС"),
-                BotCommand(command="addbutton", description="➕ Добавить кнопку"),
-                BotCommand(command="delbutton", description="🗑 Удалить кнопку"),
-                BotCommand(command="buttons", description="🔘 Список кнопок"),
                 BotCommand(command="queue", description="Запланированные посты"),
                 BotCommand(command="template", description="Шаблон подписи"),
                 BotCommand(command="settemplate", description="Изменить шаблон"),
@@ -203,14 +188,10 @@ async def main() -> None:
                 BotCommand(command="cancel", description="Отменить черновик"),
             ]
         )
-
         await dispatcher.start_polling(
             bot,
-            config=config,
-            repository=repository,
             allowed_updates=dispatcher.resolve_used_update_types(),
         )
-
     finally:
         scheduler_task.cancel()
         await reference_catalog.stop()

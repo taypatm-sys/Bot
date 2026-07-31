@@ -163,38 +163,6 @@ class PrintAssetSpec(BaseModel):
     analysis_confidence: int = Field(ge=0, le=100)
 
 
-class MockupQualityCheck(BaseModel):
-    overall_score: int = Field(ge=0, le=100)
-    product_type_match: bool
-    print_side_match: bool
-    garment_color_score: int = Field(ge=0, le=100)
-    garment_fit_score: int = Field(ge=0, le=100)
-    garment_silhouette_score: int = Field(ge=0, le=100)
-    print_fidelity_score: int = Field(ge=0, le=100)
-    print_scale_position_score: int = Field(ge=0, le=100)
-    reference_composition_score: int = Field(ge=0, le=100)
-    old_reference_artwork_removed: bool
-    unrequested_scene_changes: bool
-    reason: str = Field(min_length=1, max_length=800)
-    correction_instruction: str = Field(default="", max_length=1000)
-
-    def acceptable(self, *, minimum_score: int, has_separate_print: bool) -> bool:
-        required_print_score = 88 if has_separate_print else 80
-        return bool(
-            self.product_type_match
-            and self.print_side_match
-            and self.old_reference_artwork_removed
-            and not self.unrequested_scene_changes
-            and self.overall_score >= minimum_score
-            and self.garment_color_score >= 82
-            and self.garment_fit_score >= 78
-            and self.garment_silhouette_score >= 78
-            and self.print_fidelity_score >= required_print_score
-            and self.print_scale_position_score >= 80
-            and self.reference_composition_score >= 76
-        )
-
-
 def _clamp_int(value: float, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(round(value))))
 
@@ -562,11 +530,8 @@ def prepare_source_print_detail(
         y0 = box.y / 100.0 * height
         x1 = (box.x + box.width) / 100.0 * width
         y1 = (box.y + box.height) / 100.0 * height
-        # Keep the crop tightly focused on the artwork. Older versions used
-        # 55% padding, which let the generator treat surrounding shirt fabric as
-        # part of the print and often simplified or resized the design.
-        pad_x = max(8.0, (x1 - x0) * 0.10)
-        pad_y = max(8.0, (y1 - y0) * 0.10)
+        pad_x = max(width * 0.08, (x1 - x0) * 0.55)
+        pad_y = max(height * 0.08, (y1 - y0) * 0.55)
         crop_box = (
             max(0, int(x0 - pad_x)),
             max(0, int(y0 - pad_y)),
@@ -591,16 +556,9 @@ def prepare_source_print_detail(
     detail = image.crop(crop_box)
     if min(detail.size) < 180:
         return None
-    if max(detail.size) < 1800:
-        scale = min(4.0, 1800 / max(detail.size))
-        detail = detail.resize(
-            (max(1, int(detail.width * scale)), max(1, int(detail.height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-    else:
-        detail.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+    detail.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
     output = io.BytesIO()
-    detail.save(output, format="JPEG", quality=98, subsampling=0, optimize=True)
+    detail.save(output, format="JPEG", quality=96, subsampling=0, optimize=True)
     return output.getvalue()
 
 
@@ -1148,9 +1106,7 @@ def build_model_photo_prompt(
                 f"- Top offset is {spec.print_top_offset_percent}% below the neckline/collar.\n"
                 f"- Left offset is {spec.print_left_offset_percent}% of torso width, center at {spec.print_center_x_percent}%.\n"
                 f"Construction: {spec.construction_details}. SILHOUETTE LOCK: preserve the same apparent neckline width, shoulder drop, sleeve length, body width, hem length and overall fit seen on Image 1. "
-                "Do not redraw or alter any graphic elements. Never invent a rectangular backing. Do NOT turn a moderate relaxed garment into an exaggerated oversized fashion tee, and do NOT slim it down either. "
-
-
+                "Do NOT turn a moderate relaxed garment into an exaggerated oversized fashion tee, and do NOT slim it down either. "
                 f"The intended wearer is {spec.target_gender}, target age group {spec.target_age_group}. "
                 f"The artwork mood tags are {', '.join(spec.moods)}. "
                 "CRITICAL MANDATORY PRINT SCALE CONTRACT: Image 1 (Source Product) is the ABSOLUTE MASTER SOURCE for print size, scale, and placement on the model. "
@@ -1232,8 +1188,7 @@ def build_model_photo_prompt(
     if has_style_reference:
         reference_direction = (
             "STRICT REFERENCE SHOT RECONSTRUCTION - HIGHEST PRIORITY:\n"
-            "- The manually selected photographic reference is a spatial shot blueprint, not a loose mood board. "
-
+            "- The photographic reference is a spatial shot blueprint, not a loose mood board. "
             "Reconstruct the same shot geometry before replacing the product.\n"
             "- Match the reference's subject scale, subject position, camera height, camera "
             "distance, crop boundaries, head angle, torso angle, shoulder angle, body orientation, "
@@ -1258,8 +1213,7 @@ def build_model_photo_prompt(
             "product type, exact color, wash, construction, print pixels, print scale and placement.\n"
             "- Remove every trace of the reference product's original print, logo or text before placing the "
             "source artwork. No ghost letters or remnants may remain.\n"
-            "- No extra people, No crowd. Target subject occupies 75 to 90 percent of height, no new props, no new room, no new street and no cleaner background than the "
-
+            "- No extra people, no new props, no new room, no new street and no cleaner background than the "
             "reference.\n"
             "- Preserve the exact source product color and wash. Do not reinterpret charcoal, washed gray, "
             "beige or any other color through creative grading.\n"
@@ -1319,8 +1273,7 @@ def build_model_photo_prompt(
             "It is a real DTF heat-transfer layer bonded to the fabric surface. The print text and graphic MUST bend, warp, and contour naturally following the curves, folds, and wrinkles of the t-shirt back/chest fabric.\n"
             "- LIGHTING & SHADOW INTEGRATION: The print artwork MUST absorb the exact directional lighting, ambient shadows, and color temperature of the scene. If a shadow falls across the model's back or shirt fabric, that SAME shadow MUST fall over the print text/graphic, darkening the ink naturally in sync with the fabric. Never render uniform flat digital brightness across the print.\n"
             "- FABRIC GRAIN & MICRO-TEXTURE: Subtle fabric weave texture and micro-folds must show naturally through the print ink, rendering the print physically part of the garment.\n"
-            "- Natural smartphone camera response: crisp 35 mm portrait lens, authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
-
+            "- Natural smartphone camera response: authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
         )
         if has_style_reference:
             composition = (
@@ -1798,121 +1751,6 @@ class MockupGenerator:
             "Сервис анализа временно не ответил. Макет сохранен. Нажмите «Повторить "
             "анализ», отправлять файл заново не нужно."
         )
-
-    async def validate_generated_variant(
-        self,
-        *,
-        source_image_bytes: bytes,
-        source_mime_type: str,
-        generated_image_bytes: bytes,
-        generated_mime_type: str,
-        spec: MockupSpec,
-        print_image_bytes: Optional[bytes] = None,
-        print_mime_type: Optional[str] = None,
-        reference_image_bytes: Optional[bytes] = None,
-        reference_mime_type: Optional[str] = None,
-    ) -> MockupQualityCheck:
-        return await asyncio.to_thread(
-            self._validate_generated_variant_sync,
-            source_image_bytes,
-            source_mime_type,
-            generated_image_bytes,
-            generated_mime_type,
-            spec,
-            print_image_bytes,
-            print_mime_type,
-            reference_image_bytes,
-            reference_mime_type,
-        )
-
-    def _validate_generated_variant_sync(
-        self,
-        source_image_bytes: bytes,
-        source_mime_type: str,
-        generated_image_bytes: bytes,
-        generated_mime_type: str,
-        spec: MockupSpec,
-        print_image_bytes: Optional[bytes],
-        print_mime_type: Optional[str],
-        reference_image_bytes: Optional[bytes],
-        reference_mime_type: Optional[str],
-    ) -> MockupQualityCheck:
-        source_small, source_small_mime = _prepare_lightweight_analysis_bytes(
-            source_image_bytes, max_dimension=1200
-        )
-        generated_small, generated_small_mime = _prepare_lightweight_analysis_bytes(
-            generated_image_bytes, max_dimension=1200
-        )
-        contents: list[object] = [
-            (
-                "Perform a strict quality-control comparison for a DTF clothing mockup. "
-                "Do not edit or generate an image. Image 1 is the authoritative source product. "
-                "The final image must preserve its exact product type, printed side, visible color, "
-                "wash, cut, fit, garment silhouette, print artwork, print scale and placement. "
-                "The photographic reference, when supplied, is authoritative only for scene, pose, "
-                "crop, camera, background and lighting. Score objectively from 0 to 100. "
-                "Set product_type_match and print_side_match false for any mismatch. "
-                "Set unrequested_scene_changes true when the final scene, pose, crop, person visibility, "
-                "background or camera differs materially from the reference. "
-                "Set old_reference_artwork_removed false if any logo, text or graphic from the reference "
-                "remains. Print fidelity means letters, faces inside artwork, ornament, colors, layout, "
-                "aspect ratio and all elements match the source. Do not reward a merely similar design. "
-                f"Expected product: {spec.garment_type}; side: {spec.side}; color: {spec.shirt_color}; "
-                f"fit: {spec.fit}; print width: {spec.print_width_percent}%; print height: "
-                f"{spec.print_height_percent}%; top offset: {spec.print_top_offset_percent}%. "
-                "Return a concise reason and a direct correction_instruction for the image generator."
-            ),
-            "IMAGE 1 - authoritative product source:",
-            types.Part.from_bytes(data=source_small, mime_type=source_small_mime),
-        ]
-        if print_image_bytes:
-            print_small, print_small_mime = _prepare_lightweight_analysis_bytes(
-                print_image_bytes, max_dimension=1200
-            )
-            contents.extend(
-                [
-                    "IMAGE 2 - exact master print. Every visible artwork detail must match this image:",
-                    types.Part.from_bytes(data=print_small, mime_type=print_small_mime),
-                ]
-            )
-        if reference_image_bytes:
-            reference_small, reference_small_mime = _prepare_lightweight_analysis_bytes(
-                reference_image_bytes, max_dimension=1200
-            )
-            contents.extend(
-                [
-                    "PHOTOGRAPHIC REFERENCE - scene and composition only:",
-                    types.Part.from_bytes(
-                        data=reference_small,
-                        mime_type=reference_small_mime,
-                    ),
-                ]
-            )
-        contents.extend(
-            [
-                "FINAL GENERATED IMAGE TO INSPECT:",
-                types.Part.from_bytes(
-                    data=generated_small,
-                    mime_type=generated_small_mime,
-                ),
-            ]
-        )
-        response = self.client.models.generate_content(
-            model=self.analysis_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=MockupQualityCheck,
-            ),
-        )
-        parsed = getattr(response, "parsed", None)
-        if isinstance(parsed, MockupQualityCheck):
-            return parsed
-        if parsed is not None:
-            return MockupQualityCheck.model_validate(parsed)
-        if response.text:
-            return MockupQualityCheck.model_validate_json(response.text)
-        raise RuntimeError("Gemini не вернул результат проверки готового изображения")
 
     async def generate_variant(
         self,

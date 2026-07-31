@@ -32,9 +32,8 @@ def test_database_url_rejects_unknown_sslmode() -> None:
 def test_postgres_never_silently_falls_back_to_sqlite() -> None:
     repository = PostRepository(
         "postgresql://example.invalid/test",
-        allow_sqlite_fallback=False,
+        allow_sqlite_fallback=True,
     )
-
     with pytest.raises(RuntimeError, match="без перехода на SQLite"):
         repository._fallback_to_sqlite("connection failed")
     assert repository.database_url.startswith("postgresql://")

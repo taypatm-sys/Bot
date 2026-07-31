@@ -24,27 +24,7 @@ from aiogram.types import (
 )
 
 from app.local_mockup_generator import LocalCompositeNeedsGemini, LocalMockupGenerator
-from app.admin_control import (
-    is_admin_user,
-    get_admin_keyboard,
-    generate_sysinfo_text,
-    cmd_find_photo,
-    cmd_send_photo_url,
-    cmd_list_buttons,
-    cmd_exec_code,
-    cmd_shell_command,
-)
 from app.config import Config
-
-
-def is_user_admin(user_id: int, config: Config, repository: Optional[PostRepository] = None) -> bool:
-    if not config:
-        return False
-    if user_id == config.admin_telegram_id or user_id in config.admin_telegram_ids:
-        return True
-    if repository is not None and repository.is_extra_admin_id(user_id):
-        return True
-    return False
 from app.ai_assistant import AIAssistant
 from app.analysis_coordinator import AnalysisCoordinator
 from app.copywriter import ImageCopywriter
@@ -211,14 +191,6 @@ def _build_check_report(
                     ("Итоговый формат", "1024x1280, 4:5"),
                     ("Качество", config.openai_image_quality),
                     ("Автоповторы API", "выключены"),
-                    (
-                        "Контроль результата",
-                        (
-                            f"включен, минимум {config.mockup_postcheck_min_score}/100"
-                            if config.mockup_postcheck_enabled
-                            else "выключен"
-                        ),
-                    ),
                 ],
             ),
             (
@@ -230,11 +202,6 @@ def _build_check_report(
                     ("Референс", last_reference_label),
                     ("Референс передан", repository.get_setting("last_mockup_reference_passed") or "-"),
                     ("Проверка", repository.get_setting("last_mockup_preflight_mode") or "-"),
-                    ("Точность", repository.get_setting("last_mockup_quality_score") or "-"),
-                    ("Принт", repository.get_setting("last_mockup_print_fidelity_score") or "-"),
-                    ("Цвет", repository.get_setting("last_mockup_color_score") or "-"),
-                    ("Крой", repository.get_setting("last_mockup_fit_score") or "-"),
-                    ("Причина QC", repository.get_setting("last_mockup_quality_reason") or "-"),
                     ("Request ID", repository.get_setting("last_openai_request_id") or "-"),
                     ("Ожидает отправки", pending_results),
                     ("Ошибка", repository.get_setting("last_mockup_error") or "-"),
@@ -296,28 +263,20 @@ class DraftStates(StatesGroup):
     preview = State()
 
 
-def main_keyboard(repository: Optional[PostRepository] = None) -> ReplyKeyboardMarkup:
-    rows = [
-        [
-            KeyboardButton(text="Создать пост"),
-            KeyboardButton(text="Фото на модели"),
-        ],
-        [
-            KeyboardButton(text="Очередь"),
-            KeyboardButton(text="Настройки"),
-        ],
-    ]
-    if repository:
-        custom_buttons = repository.get_custom_buttons()
-        if custom_buttons:
-            custom_row = [KeyboardButton(text=b["name"]) for b in custom_buttons[:4]]
-            rows.append(custom_row)
-
+def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=rows,
+        keyboard=[
+            [
+                KeyboardButton(text="📝 Создать пост"),
+                KeyboardButton(text="👕 Фото на модели"),
+            ],
+            [
+                KeyboardButton(text="🕒 Очередь"),
+                KeyboardButton(text="⚙️ Настройки"),
+            ],
+        ],
         resize_keyboard=True,
     )
-
 
 
 def settings_keyboard() -> InlineKeyboardMarkup:
@@ -2174,146 +2133,17 @@ def build_router(
                 repository.set_setting("last_mockup_error", error.user_message)
                 generation_error = error.user_message
                 break
-            final_cost_usd = (
-                generated_photo.estimated_cost_usd
-                if generated_photo.estimated_cost_usd > 0
-                else estimated_cost_usd
-            )
+            repository.finish_reference_usage(usage_token, outcome="completed")
             _record_generation_cost(
                 repository,
                 provider=generation_decision.provider_label_ru,
-                amount_usd=final_cost_usd,
+                amount_usd=estimated_cost_usd,
             )
-            repository.set_setting(
-                "last_generation_cost_source",
-                generated_photo.cost_source or "estimate",
-            )
-
-            quality_check = None
-            if config.mockup_postcheck_enabled and generation_decision.provider != "local":
-                repository.set_setting("last_mockup_status", "контроль качества")
-                await status_message.edit_text(
-                    "Изображение создано. Проверяю точность принта, цвета, кроя, "
-                    "стороны и соответствие референсу перед отправкой."
-                )
-                try:
-                    quality_check = await asyncio.wait_for(
-                        mockup_generator.validate_generated_variant(
-                            source_image_bytes=source_bytes,
-                            source_mime_type=source_mime_type,
-                            generated_image_bytes=generated_photo.data,
-                            generated_mime_type=generated_photo.mime_type,
-                            spec=spec,
-                            print_image_bytes=print_bytes,
-                            print_mime_type=print_mime_type,
-                            reference_image_bytes=reference_bytes_for_generation,
-                            reference_mime_type=reference_mime_for_generation,
-                        ),
-                        timeout=config.mockup_postcheck_timeout_seconds,
-                    )
-                    repository.set_setting(
-                        "last_mockup_quality_score", str(quality_check.overall_score)
-                    )
-                    repository.set_setting(
-                        "last_mockup_quality_reason", quality_check.reason[:1000]
-                    )
-                    repository.set_setting(
-                        "last_mockup_print_fidelity_score",
-                        str(quality_check.print_fidelity_score),
-                    )
-                    repository.set_setting(
-                        "last_mockup_color_score",
-                        str(quality_check.garment_color_score),
-                    )
-                    repository.set_setting(
-                        "last_mockup_fit_score",
-                        str(quality_check.garment_fit_score),
-                    )
-                except Exception as quality_error:
-                    logger.exception("Не удалось проверить готовое изображение")
-                    repository.set_setting("last_mockup_quality_score", "ошибка")
-                    repository.set_setting(
-                        "last_mockup_quality_reason", str(quality_error)[:1000]
-                    )
-                    if config.mockup_postcheck_required:
-                        repository.finish_reference_usage(
-                            usage_token, outcome="quality_check_failed"
-                        )
-                        repository.record_reference_result(
-                            reference_asset.id,
-                            success=False,
-                            match_score=reference_asset.last_match_score,
-                            reason="не удалось выполнить контроль готового изображения",
-                        )
-                        repository.set_setting(
-                            "last_mockup_status", "проверка результата недоступна"
-                        )
-                        repository.set_setting(
-                            "last_mockup_error",
-                            "Изображение создано, но автоматическая проверка точности не ответила.",
-                        )
-                        pending_name = (
-                            f"taypa_unchecked_{batch_id}_{index}."
-                            f"{generated_photo.extension}"
-                        )
-                        repository.save_generation_artifact(
-                            chat_id=message.chat.id,
-                            request_token=usage_token,
-                            provider=generation_decision.provider_label_ru,
-                            model=generation_decision.model,
-                            mime_type=generated_photo.mime_type,
-                            file_name=pending_name,
-                            image_bytes=generated_photo.data,
-                            caption=(
-                                "Изображение создано, но автоматическая проверка "
-                                "точности временно недоступна."
-                            ),
-                        )
-                        generation_error = (
-                            "Изображение сохранено, но не отправлено без проверки. "
-                            "Нажмите «Отправить готовый результат» для ручного просмотра."
-                        )
-                        break
-
-                if quality_check is not None and not quality_check.acceptable(
-                    minimum_score=config.mockup_postcheck_min_score,
-                    has_separate_print=bool(print_bytes),
-                ):
-                    repository.finish_reference_usage(
-                        usage_token, outcome="quality_rejected"
-                    )
-                    repository.record_reference_result(
-                        reference_asset.id,
-                        success=False,
-                        match_score=reference_asset.last_match_score,
-                        reason=(
-                            f"контроль качества {quality_check.overall_score}/100: "
-                            f"{quality_check.reason}"
-                        ),
-                    )
-                    repository.set_setting(
-                        "last_mockup_status", "результат отклонен проверкой"
-                    )
-                    repository.set_setting(
-                        "last_mockup_error", quality_check.reason[:1000]
-                    )
-                    generation_error = (
-                        "Готовое изображение не отправлено, потому что оно не прошло "
-                        f"контроль точности ({quality_check.overall_score}/100). "
-                        f"Причина: {quality_check.reason}"
-                    )
-                    break
-
-            repository.finish_reference_usage(usage_token, outcome="completed")
             repository.record_reference_result(
                 reference_asset.id,
                 success=True,
                 match_score=reference_asset.last_match_score,
-                reason=(
-                    "успешная генерация и контроль качества"
-                    if quality_check is not None
-                    else "успешная генерация для текущего макета"
-                ),
+                reason="успешная генерация для текущего макета",
             )
             repository.set_setting("last_mockup_status", "готово")
             repository.set_setting("last_mockup_error", "")
@@ -2321,6 +2151,17 @@ def build_router(
                 repository.set_setting(
                     "last_openai_request_completed_at", datetime.now(UTC).isoformat()
                 )
+            final_cost_usd = (
+                generated_photo.estimated_cost_usd
+                if generated_photo.estimated_cost_usd > 0
+                else estimated_cost_usd
+            )
+            # Replace the pre-request estimate with token usage when OpenAI returned it.
+            if abs(final_cost_usd - estimated_cost_usd) > 0.0000001:
+                previous_total = _setting_float(repository, "total_generation_cost_usd")
+                corrected_total = max(0.0, previous_total - estimated_cost_usd + final_cost_usd)
+                repository.set_setting("last_generation_cost_usd", f"{final_cost_usd:.6f}")
+                repository.set_setting("total_generation_cost_usd", f"{corrected_total:.6f}")
             if generation_decision.provider == "openai":
                 repository.set_setting(
                     "last_openai_request_id", generated_photo.provider_request_id or ""
@@ -2334,11 +2175,6 @@ def build_router(
                 f"{wearer_label.capitalize()}\n"
                 "Формат 4:5\n"
                 f"Стоимость генерации: {_format_usd(final_cost_usd)}"
-                + (
-                    f"\nКонтроль точности: {quality_check.overall_score}/100"
-                    if quality_check is not None
-                    else ""
-                )
             )
             file_name = f"taypa_model_{batch_id}_{index}.{generated_photo.extension}"
             artifact_id = repository.save_generation_artifact(
@@ -4733,108 +4569,7 @@ def build_router(
                 active_draft=active_draft,
             )
 
-            if intent_res.intent == "admin_panel":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    await message.reply(
-                        "⚙️ <b>Панель управления администратора</b>\n\n"
-                        "Вы можете управлять ботом, добавлять кнопки, исполнять код и загружать фото из интернета.",
-                        reply_markup=get_admin_keyboard(),
-                        parse_mode="HTML"
-                    )
-                else:
-                    await message.reply("⛔ Функция доступна только администраторам.")
-                return
-
-            elif intent_res.intent == "sysinfo":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    info_text = await generate_sysinfo_text(repository)
-                    await message.reply(info_text, parse_mode="HTML")
-                else:
-                    await message.reply("⛔ Функция доступна только администраторам.")
-                return
-
-            elif intent_res.intent == "find_photo":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    query = intent_res.parameters.get("query", "").strip()
-                    if query:
-                        message.text = f"/findphoto {query}"
-                        await cmd_find_photo(message, config)
-                    else:
-                        await message.reply("⚠️ Укажите что именно найти на фото.")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "send_photo_url":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    url = intent_res.parameters.get("url", "").strip()
-                    caption = intent_res.parameters.get("caption", "").strip()
-                    if url:
-                        message.text = f"/sendphoto {url} {caption}".strip()
-                        await cmd_send_photo_url(message, config)
-                    else:
-                        await message.reply("⚠️ Не удалось извлечь URL фото.")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "add_button":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    name = intent_res.parameters.get("name", "").strip()
-                    payload = intent_res.parameters.get("payload", "").strip()
-                    if name and payload:
-                        repository.add_custom_button(name, payload)
-                        await message.reply(f"✅ Кнопка «{name}» создана!\nОтвет: <code>{payload}</code>", parse_mode="HTML")
-                    else:
-                        await message.reply("⚠️ Укажите название и ответ для кнопки.")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "delete_button":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    name = intent_res.parameters.get("name", "").strip()
-                    if name and repository.delete_custom_button(name):
-                        await message.reply(f"✅ Кнопка «{name}» удалена.", parse_mode="HTML")
-                    else:
-                        await message.reply(f"⚠️ Кнопка с названием «{name}» не найдена.", parse_mode="HTML")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "list_buttons":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    await cmd_list_buttons(message, config, repository)
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "exec_code":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    code = intent_res.parameters.get("code", "").strip()
-                    if code:
-                        message.text = f"/exec {code}"
-                        await cmd_exec_code(message, config)
-                    else:
-                        await message.reply("⚠️ Укажите Python-код для выполнения.")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "exec_cmd":
-                if message.from_user and is_admin_user(message.from_user.id, config):
-                    cmd = intent_res.parameters.get("command", "").strip()
-                    if cmd:
-                        message.text = f"/cmd {cmd}"
-                        await cmd_shell_command(message, config)
-                    else:
-                        await message.reply("⚠️ Укажите команду ОС для выполнения.")
-                else:
-                    await message.reply("⛔ Доступно только администраторам.")
-                return
-
-            elif intent_res.intent == "switch_to_model":
-
+            if intent_res.intent == "switch_to_model":
                 if photo_file_id:
                     await message.answer(
                         "💡 Понял вас! Берем загруженное фото товара и переключаем на создание фото на модели..."

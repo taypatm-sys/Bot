@@ -25,7 +25,6 @@ DEFAULT_OPENAI_IMAGE_QUALITY = "medium"
 DEFAULT_OPENAI_IMAGE_COST_USD = 0.0
 DEFAULT_GEMINI_IMAGE_COST_USD = 0.0
 DEFAULT_MOCKUP_VARIANTS = 1
-DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE = 82
 LEGACY_GEMINI_MODELS = {
     "gemini-2.5-flash",
     "models/gemini-2.5-flash",
@@ -230,6 +229,7 @@ def _load_timezone(name: str) -> tzinfo:
 class Config:
     telegram_bot_token: str
     gemini_api_key: str
+    openai_api_key: str
     admin_telegram_id: int
     channel_id: ChatId
     contact_username: str
@@ -239,9 +239,7 @@ class Config:
     copy_language: str
     database_path: Path
     caption_template_path: Path
-    openai_api_key: str = ""
     database_url: str = ""
-
     allow_sqlite_fallback: bool = False
     admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
@@ -259,10 +257,6 @@ class Config:
     reference_min_pool_size: int = 20
     reference_analysis_timeout_seconds: float = 90.0
     mockup_analysis_timeout_seconds: float = 150.0
-    mockup_postcheck_enabled: bool = True
-    mockup_postcheck_required: bool = True
-    mockup_postcheck_min_score: int = DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE
-    mockup_postcheck_timeout_seconds: float = 120.0
     reference_user_agent: str = "TaypaReferenceCatalog/5.3"
     pinterest_access_token: str = ""
     pinterest_search_enabled: bool = False
@@ -290,14 +284,15 @@ class Config:
         pinterest_access_token = os.getenv("PINTEREST_ACCESS_TOKEN", "").strip()
         pinterest_enabled_raw = os.getenv("PINTEREST_SEARCH_ENABLED")
         if pinterest_enabled_raw is None or not pinterest_enabled_raw.strip():
+            # Supplying a Pinterest token is enough to enable automatic search.
+            # An explicit false value still disables it.
             pinterest_search_enabled = bool(pinterest_access_token)
         else:
-            pinterest_search_enabled=_bool_env(
+            pinterest_search_enabled = _bool_env(
                 "PINTEREST_SEARCH_ENABLED",
                 pinterest_enabled_raw,
-                default=False,
+                default=bool(pinterest_access_token),
             )
-
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -392,32 +387,6 @@ class Config:
                 "MOCKUP_ANALYSIS_TIMEOUT_SECONDS",
                 os.getenv("MOCKUP_ANALYSIS_TIMEOUT_SECONDS", "150"),
                 150.0,
-            ),
-            mockup_postcheck_enabled=_bool_env(
-                "MOCKUP_POSTCHECK_ENABLED",
-                os.getenv("MOCKUP_POSTCHECK_ENABLED", "true"),
-                default=True,
-            ),
-            mockup_postcheck_required=_bool_env(
-                "MOCKUP_POSTCHECK_REQUIRED",
-                os.getenv("MOCKUP_POSTCHECK_REQUIRED", "true"),
-                default=True,
-            ),
-            mockup_postcheck_min_score=min(
-                100,
-                _positive_int(
-                    "MOCKUP_POSTCHECK_MIN_SCORE",
-                    os.getenv(
-                        "MOCKUP_POSTCHECK_MIN_SCORE",
-                        str(DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE),
-                    ),
-                    DEFAULT_MOCKUP_POSTCHECK_MIN_SCORE,
-                ),
-            ),
-            mockup_postcheck_timeout_seconds=_positive_float(
-                "MOCKUP_POSTCHECK_TIMEOUT_SECONDS",
-                os.getenv("MOCKUP_POSTCHECK_TIMEOUT_SECONDS", "120"),
-                120.0,
             ),
             reference_user_agent=(
                 os.getenv("REFERENCE_USER_AGENT", "TaypaReferenceCatalog/5.3").strip()
