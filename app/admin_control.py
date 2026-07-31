@@ -45,18 +45,19 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
     """Генерирует главную панель управления бота."""
     kb = [
         [
-            InlineKeyboardButton(text="📊 Статус системы", callback_query_data="admin:sysinfo"),
-            InlineKeyboardButton(text="🔘 Управление кнопками", callback_query_data="admin:buttons_list"),
+            InlineKeyboardButton(text="📊 Статус системы", callback_data="admin:sysinfo"),
+            InlineKeyboardButton(text="🔘 Управление кнопками", callback_data="admin:buttons_list"),
         ],
         [
-            InlineKeyboardButton(text="🖼 Поиск картинки", callback_query_data="admin:search_photo_prompt"),
-            InlineKeyboardButton(text="⏱ Демо прогресс-бара", callback_query_data="admin:demo_progress"),
+            InlineKeyboardButton(text="🖼 Поиск картинки", callback_data="admin:search_photo_prompt"),
+            InlineKeyboardButton(text="⏱ Демо прогресс-бара", callback_data="admin:demo_progress"),
         ],
         [
-            InlineKeyboardButton(text="❓ Помощь по командам", callback_query_data="admin:help"),
+            InlineKeyboardButton(text="❓ Помощь по командам", callback_data="admin:help"),
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 
 @admin_router.message(Command("admin"))
