@@ -625,6 +625,31 @@ class PostRepository:
                 (key, value, now),
             )
 
+    def get_custom_buttons(self) -> list[dict[str, str]]:
+        raw = self.get_setting("custom_buttons_json")
+        if not raw:
+            return []
+        try:
+            return json.loads(raw)
+        except Exception:
+            return []
+
+    def add_custom_button(self, name: str, payload: str) -> None:
+        buttons = self.get_custom_buttons()
+        # Если кнопка с таким именем есть, обновляем ее, иначе добавляем
+        existing = [b for b in buttons if b.get("name") != name]
+        existing.append({"name": name, "payload": payload})
+        self.set_setting("custom_buttons_json", json.dumps(existing, ensure_ascii=False))
+
+    def delete_custom_button(self, name: str) -> bool:
+        buttons = self.get_custom_buttons()
+        filtered = [b for b in buttons if b.get("name") != name]
+        if len(filtered) == len(buttons):
+            return False
+        self.set_setting("custom_buttons_json", json.dumps(filtered, ensure_ascii=False))
+        return True
+
+
     def save_generation_artifact(
         self,
         *,
