@@ -649,11 +649,19 @@ class ReferenceCatalog:
         )
         signature = "|".join(queries).encode("utf-8")
         source_name = f"pinterest-product-{hashlib.sha1(signature).hexdigest()[:12]}"
-        added = await self._search_pinterest_terms(
-            queries[: self.pinterest_queries_per_cycle],
-            source_name=source_name,
-            max_urls=12,
-        )
+        try:
+            added = await self._search_pinterest_terms(
+                queries[: self.pinterest_queries_per_cycle],
+                source_name=source_name,
+                max_urls=12,
+            )
+        except Exception as error:
+            logger.info("Автопоиск Pinterest по товару пропущен (%s)", error)
+            self.repository.set_setting(
+                "pinterest_discovery_status", f"пропущен: {str(error)[:160]}"
+            )
+            return "", 0, 0
+
         processed = 0
         for _ in range(max(0, min(import_now, 8))):
             if not await self.process_next(source_name=source_name):
@@ -749,11 +757,12 @@ class ReferenceCatalog:
                 "pinterest_last_discovery_at", now.isoformat()
             )
         except Exception as error:
-            logger.warning("Автопоиск Pinterest не выполнен: %s", error)
+            logger.info("Автопоиск Pinterest пропущен (%s)", error)
             self.repository.set_setting(
-                "pinterest_discovery_status", f"ошибка: {str(error)[:160]}"
+                "pinterest_discovery_status", f"пропущен: {str(error)[:160]}"
             )
             added = 0
+
         self._next_discovery_at = now + timedelta(
             seconds=self.pinterest_search_interval_seconds
         )
