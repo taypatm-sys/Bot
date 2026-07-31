@@ -143,6 +143,10 @@ async def main() -> None:
     )
 
     dispatcher = Dispatcher()
+    dispatcher.workflow_data.update(
+        config=config,
+        repository=repository,
+    )
     dispatcher.include_router(admin_router)
     dispatcher.include_router(
         build_router(
@@ -202,8 +206,11 @@ async def main() -> None:
 
         await dispatcher.start_polling(
             bot,
+            config=config,
+            repository=repository,
             allowed_updates=dispatcher.resolve_used_update_types(),
         )
+
     finally:
         scheduler_task.cancel()
         await reference_catalog.stop()

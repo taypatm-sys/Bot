@@ -31,8 +31,10 @@ admin_router = Router(name="admin_control")
 START_TIME = time.time()
 
 
-def is_admin_user(user_id: int, config: Config) -> bool:
+def is_admin_user(user_id: int, config: Optional[Config] = None) -> bool:
     """Проверяет, является ли пользователь администратором бота."""
+    if not config:
+        return False
     allowed = {config.admin_telegram_id}
     if config.admin_telegram_ids:
         allowed.update(config.admin_telegram_ids)
@@ -58,7 +60,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
 
 
 @admin_router.message(Command("admin"))
-async def cmd_admin_panel(message: Message, config: Config):
+async def cmd_admin_panel(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен. Эта команда только для администраторов.")
         return
@@ -71,7 +73,12 @@ async def cmd_admin_panel(message: Message, config: Config):
 
 
 @admin_router.callback_query(F.data.startswith("admin:"))
-async def handle_admin_callback(callback: CallbackQuery, config: Config, repository: PostRepository):
+async def handle_admin_callback(
+    callback: CallbackQuery,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
     if not callback.from_user or not is_admin_user(callback.from_user.id, config):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
@@ -83,7 +90,7 @@ async def handle_admin_callback(callback: CallbackQuery, config: Config, reposit
         await callback.answer()
 
     elif data == "admin:buttons_list":
-        buttons = repository.get_custom_buttons()
+        buttons = repository.get_custom_buttons() if repository else []
         if not buttons:
             text = "🔘 <b>Список кнопок пуст.</b>\n\nЧтобы добавить кнопку, используйте:\n<code>/addbutton Название | Ответный текст или ссылка</code>"
         else:
@@ -132,14 +139,16 @@ async def handle_admin_callback(callback: CallbackQuery, config: Config, reposit
         await callback.answer()
 
 
-async def generate_sysinfo_text(repository: PostRepository) -> str:
+async def generate_sysinfo_text(repository: Optional[PostRepository] = None) -> str:
     uptime_sec = int(time.time() - START_TIME)
     mins, secs = divmod(uptime_sec, 60)
     hours, mins = divmod(mins, 60)
     days, hours = divmod(hours, 24)
     uptime_str = f"{days}д {hours}ч {mins}м {secs}с"
 
-    db_status = "PostgreSQL" if repository.database_url else "SQLite"
+    db_status = "Не подключено"
+    if repository:
+        db_status = "PostgreSQL" if repository.database_url else "SQLite"
 
     return (
         "📊 <b>Системная информация бота</b>\n\n"
@@ -152,7 +161,12 @@ async def generate_sysinfo_text(repository: PostRepository) -> str:
 
 
 @admin_router.message(Command("sysinfo"))
-async def cmd_sysinfo(message: Message, config: Config, repository: PostRepository):
+async def cmd_sysinfo(
+    message: Message,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
@@ -161,12 +175,12 @@ async def cmd_sysinfo(message: Message, config: Config, repository: PostReposito
 
 
 @admin_router.message(Command("exec"))
-async def cmd_exec_code(message: Message, config: Config):
+async def cmd_exec_code(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    code = message.text.partition(" ")[2].strip()
+    code = message.text.partition(" ")[2].strip() if message.text else ""
     if not code:
         await message.reply("⚠️ Укажите Python-код для выполнения:\n<code>/exec print(2 + 2)</code>", parse_mode="HTML")
         return
@@ -234,12 +248,12 @@ async def cmd_exec_code(message: Message, config: Config):
 
 
 @admin_router.message(Command("eval"))
-async def cmd_eval_expr(message: Message, config: Config):
+async def cmd_eval_expr(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    expr = message.text.partition(" ")[2].strip()
+    expr = message.text.partition(" ")[2].strip() if message.text else ""
     if not expr:
         await message.reply("⚠️ Укажите выражение для оценки:\n<code>/eval 10 * 25</code>", parse_mode="HTML")
         return
@@ -252,12 +266,12 @@ async def cmd_eval_expr(message: Message, config: Config):
 
 
 @admin_router.message(Command("cmd"))
-async def cmd_shell_command(message: Message, config: Config):
+async def cmd_shell_command(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    command_str = message.text.partition(" ")[2].strip()
+    command_str = message.text.partition(" ")[2].strip() if message.text else ""
     if not command_str:
         await message.reply("⚠️ Укажите консольную команду:\n<code>/cmd git status</code>", parse_mode="HTML")
         return
@@ -287,12 +301,17 @@ async def cmd_shell_command(message: Message, config: Config):
 
 
 @admin_router.message(Command("addbutton"))
-async def cmd_add_button(message: Message, config: Config, repository: PostRepository):
+async def cmd_add_button(
+    message: Message,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    raw = message.text.partition(" ")[2].strip()
+    raw = message.text.partition(" ")[2].strip() if message.text else ""
     if "|" not in raw:
         await message.reply(
             "⚠️ <b>Формат команды:</b>\n"
@@ -312,22 +331,28 @@ async def cmd_add_button(message: Message, config: Config, repository: PostRepos
         await message.reply("⚠️ Имя кнопки и ответный текст не должны быть пустыми.")
         return
 
-    repository.add_custom_button(name, payload)
+    if repository:
+        repository.add_custom_button(name, payload)
     await message.reply(f"✅ <b>Кнопка «{name}» успешно добавлена!</b>\nОтвет: <code>{payload}</code>", parse_mode="HTML")
 
 
 @admin_router.message(Command("delbutton"))
-async def cmd_del_button(message: Message, config: Config, repository: PostRepository):
+async def cmd_del_button(
+    message: Message,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    name = message.text.partition(" ")[2].strip()
+    name = message.text.partition(" ")[2].strip() if message.text else ""
     if not name:
         await message.reply("⚠️ Укажите название кнопки для удаления:\n<code>/delbutton Название</code>", parse_mode="HTML")
         return
 
-    success = repository.delete_custom_button(name)
+    success = repository.delete_custom_button(name) if repository else False
     if success:
         await message.reply(f"✅ Кнопка «{name}» удалена.", parse_mode="HTML")
     else:
@@ -335,12 +360,17 @@ async def cmd_del_button(message: Message, config: Config, repository: PostRepos
 
 
 @admin_router.message(Command("buttons"))
-async def cmd_list_buttons(message: Message, config: Config, repository: PostRepository):
+async def cmd_list_buttons(
+    message: Message,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    buttons = repository.get_custom_buttons()
+    buttons = repository.get_custom_buttons() if repository else []
     if not buttons:
         await message.reply("🔘 <b>Список кнопок пуст.</b>\nДобавить: <code>/addbutton Имя | Ответ</code>", parse_mode="HTML")
         return
@@ -353,12 +383,12 @@ async def cmd_list_buttons(message: Message, config: Config, repository: PostRep
 
 
 @admin_router.message(Command("sendphoto"))
-async def cmd_send_photo_url(message: Message, config: Config):
+async def cmd_send_photo_url(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    parts = message.text.split(maxsplit=2)
+    parts = message.text.split(maxsplit=2) if message.text else []
     if len(parts) < 2:
         await message.reply("⚠️ Укажите URL изображения:\n<code>/sendphoto https://example.com/image.jpg [Подпись]</code>", parse_mode="HTML")
         return
@@ -382,12 +412,12 @@ async def cmd_send_photo_url(message: Message, config: Config):
 
 
 @admin_router.message(Command("findphoto"))
-async def cmd_find_photo(message: Message, config: Config):
+async def cmd_find_photo(message: Message, config: Optional[Config] = None, **kwargs):
     if not message.from_user or not is_admin_user(message.from_user.id, config):
         await message.reply("⛔ Доступ запрещен.")
         return
 
-    query = message.text.partition(" ")[2].strip()
+    query = message.text.partition(" ")[2].strip() if message.text else ""
     if not query:
         await message.reply("⚠️ Укажите запрос для поиска фото:\n<code>/findphoto красная футболка</code>", parse_mode="HTML")
         return
@@ -426,8 +456,8 @@ async def cmd_find_photo(message: Message, config: Config):
         await status_msg.edit_text("❌ Не удалось загрузить ни одно из найденных фото.")
 
 
-async def _custom_button_filter(message: Message, repository: PostRepository) -> bool:
-    if not message.text:
+async def _custom_button_filter(message: Message, repository: Optional[PostRepository] = None, **kwargs) -> bool:
+    if not message.text or not repository:
         return False
     text = message.text.strip().casefold()
     buttons = repository.get_custom_buttons()
@@ -435,7 +465,13 @@ async def _custom_button_filter(message: Message, repository: PostRepository) ->
 
 
 @admin_router.message(_custom_button_filter)
-async def handle_custom_button_click(message: Message, repository: PostRepository):
+async def handle_custom_button_click(
+    message: Message,
+    repository: Optional[PostRepository] = None,
+    **kwargs,
+):
+    if not message.text or not repository:
+        return
     text = message.text.strip().casefold()
     buttons = repository.get_custom_buttons()
     for b in buttons:
@@ -446,4 +482,3 @@ async def handle_custom_button_click(message: Message, repository: PostRepositor
             else:
                 await message.reply(payload, parse_mode="HTML")
             return
-
