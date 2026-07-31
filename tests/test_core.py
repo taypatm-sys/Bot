@@ -1418,7 +1418,8 @@ class HandlersUXTests(unittest.TestCase):
         from unittest.mock import patch
         import psycopg
 
-        repository = PostRepository("postgresql://user:pass@invalid_domain/dbname")
+        repository = PostRepository("postgresql://user:pass@invalid_domain/dbname", allow_sqlite_fallback=True)
+
         repository.path = Path(tempfile.gettempdir()) / "fallback_test.sqlite3"
         try:
             with patch("psycopg_pool.ConnectionPool.open", side_effect=psycopg.OperationalError("quota exceeded")):

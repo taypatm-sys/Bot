@@ -1148,7 +1148,9 @@ def build_model_photo_prompt(
                 f"- Top offset is {spec.print_top_offset_percent}% below the neckline/collar.\n"
                 f"- Left offset is {spec.print_left_offset_percent}% of torso width, center at {spec.print_center_x_percent}%.\n"
                 f"Construction: {spec.construction_details}. SILHOUETTE LOCK: preserve the same apparent neckline width, shoulder drop, sleeve length, body width, hem length and overall fit seen on Image 1. "
-                "Do NOT turn a moderate relaxed garment into an exaggerated oversized fashion tee, and do NOT slim it down either. "
+                "Do not redraw or alter any graphic elements. Never invent a rectangular backing. Do NOT turn a moderate relaxed garment into an exaggerated oversized fashion tee, and do NOT slim it down either. "
+
+
                 f"The intended wearer is {spec.target_gender}, target age group {spec.target_age_group}. "
                 f"The artwork mood tags are {', '.join(spec.moods)}. "
                 "CRITICAL MANDATORY PRINT SCALE CONTRACT: Image 1 (Source Product) is the ABSOLUTE MASTER SOURCE for print size, scale, and placement on the model. "
@@ -1230,7 +1232,8 @@ def build_model_photo_prompt(
     if has_style_reference:
         reference_direction = (
             "STRICT REFERENCE SHOT RECONSTRUCTION - HIGHEST PRIORITY:\n"
-            "- The photographic reference is a spatial shot blueprint, not a loose mood board. "
+            "- The manually selected photographic reference is a spatial shot blueprint, not a loose mood board. "
+
             "Reconstruct the same shot geometry before replacing the product.\n"
             "- Match the reference's subject scale, subject position, camera height, camera "
             "distance, crop boundaries, head angle, torso angle, shoulder angle, body orientation, "
@@ -1255,7 +1258,8 @@ def build_model_photo_prompt(
             "product type, exact color, wash, construction, print pixels, print scale and placement.\n"
             "- Remove every trace of the reference product's original print, logo or text before placing the "
             "source artwork. No ghost letters or remnants may remain.\n"
-            "- No extra people, no new props, no new room, no new street and no cleaner background than the "
+            "- No extra people, No crowd. Target subject occupies 75 to 90 percent of height, no new props, no new room, no new street and no cleaner background than the "
+
             "reference.\n"
             "- Preserve the exact source product color and wash. Do not reinterpret charcoal, washed gray, "
             "beige or any other color through creative grading.\n"
@@ -1315,7 +1319,8 @@ def build_model_photo_prompt(
             "It is a real DTF heat-transfer layer bonded to the fabric surface. The print text and graphic MUST bend, warp, and contour naturally following the curves, folds, and wrinkles of the t-shirt back/chest fabric.\n"
             "- LIGHTING & SHADOW INTEGRATION: The print artwork MUST absorb the exact directional lighting, ambient shadows, and color temperature of the scene. If a shadow falls across the model's back or shirt fabric, that SAME shadow MUST fall over the print text/graphic, darkening the ink naturally in sync with the fabric. Never render uniform flat digital brightness across the print.\n"
             "- FABRIC GRAIN & MICRO-TEXTURE: Subtle fabric weave texture and micro-folds must show naturally through the print ink, rendering the print physically part of the garment.\n"
-            "- Natural smartphone camera response: authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
+            "- Natural smartphone camera response: crisp 35 mm portrait lens, authentic unretouched real human skin texture with pores, realistic soft grain, and organic unposed lifestyle atmosphere. No 3D render look, no plastic glossy skin, no stock-photo perfection.\n"
+
         )
         if has_style_reference:
             composition = (

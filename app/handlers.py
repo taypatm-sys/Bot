@@ -24,7 +24,27 @@ from aiogram.types import (
 )
 
 from app.local_mockup_generator import LocalCompositeNeedsGemini, LocalMockupGenerator
+from app.admin_control import (
+    is_admin_user,
+    get_admin_keyboard,
+    generate_sysinfo_text,
+    cmd_find_photo,
+    cmd_send_photo_url,
+    cmd_list_buttons,
+    cmd_exec_code,
+    cmd_shell_command,
+)
 from app.config import Config
+
+
+def is_user_admin(user_id: int, config: Config, repository: Optional[PostRepository] = None) -> bool:
+    if not config:
+        return False
+    if user_id == config.admin_telegram_id or user_id in config.admin_telegram_ids:
+        return True
+    if repository is not None and repository.is_extra_admin_id(user_id):
+        return True
+    return False
 from app.ai_assistant import AIAssistant
 from app.analysis_coordinator import AnalysisCoordinator
 from app.copywriter import ImageCopywriter
@@ -276,20 +296,28 @@ class DraftStates(StatesGroup):
     preview = State()
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="📝 Создать пост"),
-                KeyboardButton(text="👕 Фото на модели"),
-            ],
-            [
-                KeyboardButton(text="🕒 Очередь"),
-                KeyboardButton(text="⚙️ Настройки"),
-            ],
+def main_keyboard(repository: Optional[PostRepository] = None) -> ReplyKeyboardMarkup:
+    rows = [
+        [
+            KeyboardButton(text="Создать пост"),
+            KeyboardButton(text="Фото на модели"),
         ],
+        [
+            KeyboardButton(text="Очередь"),
+            KeyboardButton(text="Настройки"),
+        ],
+    ]
+    if repository:
+        custom_buttons = repository.get_custom_buttons()
+        if custom_buttons:
+            custom_row = [KeyboardButton(text=b["name"]) for b in custom_buttons[:4]]
+            rows.append(custom_row)
+
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
         resize_keyboard=True,
     )
+
 
 
 def settings_keyboard() -> InlineKeyboardMarkup:
@@ -4705,7 +4733,108 @@ def build_router(
                 active_draft=active_draft,
             )
 
-            if intent_res.intent == "switch_to_model":
+            if intent_res.intent == "admin_panel":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    await message.reply(
+                        "⚙️ <b>Панель управления администратора</b>\n\n"
+                        "Вы можете управлять ботом, добавлять кнопки, исполнять код и загружать фото из интернета.",
+                        reply_markup=get_admin_keyboard(),
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.reply("⛔ Функция доступна только администраторам.")
+                return
+
+            elif intent_res.intent == "sysinfo":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    info_text = await generate_sysinfo_text(repository)
+                    await message.reply(info_text, parse_mode="HTML")
+                else:
+                    await message.reply("⛔ Функция доступна только администраторам.")
+                return
+
+            elif intent_res.intent == "find_photo":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    query = intent_res.parameters.get("query", "").strip()
+                    if query:
+                        message.text = f"/findphoto {query}"
+                        await cmd_find_photo(message, config)
+                    else:
+                        await message.reply("⚠️ Укажите что именно найти на фото.")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "send_photo_url":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    url = intent_res.parameters.get("url", "").strip()
+                    caption = intent_res.parameters.get("caption", "").strip()
+                    if url:
+                        message.text = f"/sendphoto {url} {caption}".strip()
+                        await cmd_send_photo_url(message, config)
+                    else:
+                        await message.reply("⚠️ Не удалось извлечь URL фото.")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "add_button":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    name = intent_res.parameters.get("name", "").strip()
+                    payload = intent_res.parameters.get("payload", "").strip()
+                    if name and payload:
+                        repository.add_custom_button(name, payload)
+                        await message.reply(f"✅ Кнопка «{name}» создана!\nОтвет: <code>{payload}</code>", parse_mode="HTML")
+                    else:
+                        await message.reply("⚠️ Укажите название и ответ для кнопки.")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "delete_button":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    name = intent_res.parameters.get("name", "").strip()
+                    if name and repository.delete_custom_button(name):
+                        await message.reply(f"✅ Кнопка «{name}» удалена.", parse_mode="HTML")
+                    else:
+                        await message.reply(f"⚠️ Кнопка с названием «{name}» не найдена.", parse_mode="HTML")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "list_buttons":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    await cmd_list_buttons(message, config, repository)
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "exec_code":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    code = intent_res.parameters.get("code", "").strip()
+                    if code:
+                        message.text = f"/exec {code}"
+                        await cmd_exec_code(message, config)
+                    else:
+                        await message.reply("⚠️ Укажите Python-код для выполнения.")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "exec_cmd":
+                if message.from_user and is_admin_user(message.from_user.id, config):
+                    cmd = intent_res.parameters.get("command", "").strip()
+                    if cmd:
+                        message.text = f"/cmd {cmd}"
+                        await cmd_shell_command(message, config)
+                    else:
+                        await message.reply("⚠️ Укажите команду ОС для выполнения.")
+                else:
+                    await message.reply("⛔ Доступно только администраторам.")
+                return
+
+            elif intent_res.intent == "switch_to_model":
+
                 if photo_file_id:
                     await message.answer(
                         "💡 Понял вас! Берем загруженное фото товара и переключаем на создание фото на модели..."

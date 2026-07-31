@@ -31,14 +31,20 @@ admin_router = Router(name="admin_control")
 START_TIME = time.time()
 
 
-def is_admin_user(user_id: int, config: Optional[Config] = None) -> bool:
+def is_admin_user(
+    user_id: int,
+    config: Optional[Config] = None,
+    repository: Optional[PostRepository] = None,
+) -> bool:
     """Проверяет, является ли пользователь администратором бота."""
     if not config:
         return False
-    allowed = {config.admin_telegram_id}
-    if config.admin_telegram_ids:
-        allowed.update(config.admin_telegram_ids)
-    return user_id in allowed
+    if user_id == config.admin_telegram_id or user_id in config.admin_telegram_ids:
+        return True
+    if repository is not None and repository.is_extra_admin_id(user_id):
+        return True
+    return False
+
 
 
 def get_admin_keyboard() -> InlineKeyboardMarkup:

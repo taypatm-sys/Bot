@@ -159,22 +159,26 @@ class PostRepository:
 
     @property
     def backend_name(self) -> str:
+        if self._was_fallback:
+            return "SQLite (резервный)"
         return "PostgreSQL" if self.database_url else "SQLite"
+
 
     @property
     def is_persistent(self) -> bool:
         return bool(self.database_url)
 
     def _fallback_to_sqlite(self, reason: str) -> None:
-        # Never downgrade a configured PostgreSQL deployment to SQLite. On
-        # Railway the local filesystem is temporary, and a fallback also makes
-        # the cross-server Telegram polling lock ineffective. Failing fast is
-        # safer than appearing healthy while losing data.
+        if self.allow_sqlite_fallback:
+            self._was_fallback = True
+            self.database_url = ""
+            return
         raise RuntimeError(
             "PostgreSQL недоступен. Бот остановлен без перехода на SQLite. "
             "Проверьте DATABASE_URL и параметр sslmode. "
             f"Причина: {reason}"
         )
+
 
     def _ensure_pool(self) -> None:
         if not self.database_url or self._pool is not None:

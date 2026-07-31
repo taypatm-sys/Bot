@@ -230,7 +230,6 @@ def _load_timezone(name: str) -> tzinfo:
 class Config:
     telegram_bot_token: str
     gemini_api_key: str
-    openai_api_key: str
     admin_telegram_id: int
     channel_id: ChatId
     contact_username: str
@@ -240,7 +239,9 @@ class Config:
     copy_language: str
     database_path: Path
     caption_template_path: Path
+    openai_api_key: str = ""
     database_url: str = ""
+
     allow_sqlite_fallback: bool = False
     admin_telegram_ids: frozenset[int] = frozenset()
     gemini_image_model: str = DEFAULT_GEMINI_IMAGE_MODEL
@@ -289,15 +290,14 @@ class Config:
         pinterest_access_token = os.getenv("PINTEREST_ACCESS_TOKEN", "").strip()
         pinterest_enabled_raw = os.getenv("PINTEREST_SEARCH_ENABLED")
         if pinterest_enabled_raw is None or not pinterest_enabled_raw.strip():
-            # Supplying a Pinterest token is enough to enable automatic search.
-            # An explicit false value still disables it.
             pinterest_search_enabled = bool(pinterest_access_token)
         else:
-            pinterest_search_enabled = _bool_env(
+            pinterest_search_enabled=_bool_env(
                 "PINTEREST_SEARCH_ENABLED",
                 pinterest_enabled_raw,
-                default=bool(pinterest_access_token),
+                default=False,
             )
+
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
